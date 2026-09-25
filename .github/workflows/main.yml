@@ -1,0 +1,17 @@
+name: Despliegue Automático
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Construir imagen Docker
+        run: docker build -t proyecto-asir .
