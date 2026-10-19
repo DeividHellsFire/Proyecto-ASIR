@@ -1,0 +1,18 @@
+# WordPress runtime
+wordpress/
+wp-content/uploads/
+wp-content/cache/
+
+# Docker
+.env
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+gymtrack-backup.sql
+
+gymtrack-plugin/*.backup-*

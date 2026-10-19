@@ -1,17 +1,31 @@
-name: Despliegue Automático
+﻿name: GymTrack CI
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  build:
+  test-and-build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar código
+      - name: Descargar codigo
         uses: actions/checkout@v4
 
+      - name: Configurar PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: Comprobar sintaxis PHP
+        run: php -l gymtrack-plugin/gymtrack.php
+
+      - name: Validar Docker Compose
+        run: docker compose config
+
       - name: Construir imagen Docker
-        run: docker build -t proyecto-asir .
+        run: docker build -t gymtrack:ci .

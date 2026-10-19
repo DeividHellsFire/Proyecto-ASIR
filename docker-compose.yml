@@ -1,0 +1,45 @@
+services:
+  db:
+    image: mariadb:11
+    container_name: gymtrack-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: gymtrack_db_pass
+      MYSQL_ROOT_PASSWORD: gymtrack_root_pass
+    volumes:
+      - wordpress_db_data:/var/lib/mysql
+    networks:
+      wordpress_default:
+        aliases:
+          - db
+
+  wordpress:
+    build: .
+    container_name: gymtrack-wordpress
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - "8082:80"
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: gymtrack_db_pass
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wordpress_wordpress_data:/var/www/html
+      - ./gymtrack-plugin/gymtrack.php:/var/www/html/wp-content/plugins/gymtrack/gymtrack.php
+    networks:
+      - wordpress_default
+
+volumes:
+  wordpress_db_data:
+    external: true
+  wordpress_wordpress_data:
+    external: true
+
+networks:
+  wordpress_default:
+    external: true
