@@ -6,7 +6,7 @@ $restUrl = "$baseUrl/wp-json/gymtrack/v1"
 $testsOk = 0
 $testsFail = 0
 
-function Test-Http200 {
+function Test-Unauthorized {
     param(
         [string]$Name,
         [string]$Url
@@ -24,72 +24,51 @@ function Test-Http200 {
 
         $statusCode = [int]$response.StatusCode
 
-        if ($statusCode -eq 200) {
-            Write-Host "  OK - HTTP 200"
+        Write-Host "  ERROR - Se esperaba HTTP 401 y se recibio HTTP $statusCode"
+        $script:testsFail++
+    }
+    catch {
+        $statusCode = $null
+
+        if ($_.Exception.Response) {
+            try {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            catch {
+                $statusCode = $null
+            }
+        }
+
+        if ($statusCode -eq 401) {
+            Write-Host "  OK - Endpoint protegido (HTTP 401)"
             $script:testsOk++
         }
         else {
-            Write-Host "  ERROR - Se esperaba HTTP 200 y se recibio HTTP $statusCode"
+            Write-Host "  ERROR - Se esperaba HTTP 401 y se recibio HTTP $statusCode"
             $script:testsFail++
         }
-    }
-    catch {
-        Write-Host "  ERROR - No se pudo acceder al recurso"
-        $script:testsFail++
-    }
-}
-
-function Test-DockerContainer {
-    param(
-        [string]$ContainerName
-    )
-
-    Write-Host ""
-    Write-Host "TEST: Contenedor Docker $ContainerName"
-
-    try {
-        $status = docker inspect -f "{{.State.Status}}" $ContainerName 2>$null
-
-        if ($status -eq "running") {
-            Write-Host "  OK - Contenedor en ejecucion"
-            $script:testsOk++
-        }
-        else {
-            Write-Host "  ERROR - Estado del contenedor: $status"
-            $script:testsFail++
-        }
-    }
-    catch {
-        Write-Host "  ERROR - No se pudo consultar el contenedor"
-        $script:testsFail++
     }
 }
 
 Write-Host "========================================="
-Write-Host " GymTrack - Regression Tests"
+Write-Host " GymTrack - Functional Tests"
 Write-Host "========================================="
 
-Test-Http200 `
-    -Name "WordPress responde" `
-    -Url $baseUrl
+Test-Unauthorized `
+    -Name "Endpoint exercises rechaza peticiones no autenticadas" `
+    -Url "$restUrl/exercises"
 
-Test-Http200 `
-    -Name "Dashboard GymTrack responde" `
-    -Url "$baseUrl/gymtrack/"
+Test-Unauthorized `
+    -Name "Endpoint routines rechaza peticiones no autenticadas" `
+    -Url "$restUrl/routines"
 
-Test-Http200 `
-    -Name "WordPress REST API responde" `
-    -Url "$baseUrl/wp-json"
+Test-Unauthorized `
+    -Name "Endpoint workouts rechaza peticiones no autenticadas" `
+    -Url "$restUrl/workouts"
 
-Test-Http200 `
-    -Name "Namespace REST GymTrack responde" `
-    -Url $restUrl
-
-Test-DockerContainer `
-    -ContainerName "gymtrack-wordpress"
-
-Test-DockerContainer `
-    -ContainerName "gymtrack-db"
+Test-Unauthorized `
+    -Name "Endpoint progress rechaza peticiones no autenticadas" `
+    -Url "$restUrl/progress"
 
 Write-Host ""
 Write-Host "========================================="
@@ -100,10 +79,10 @@ Write-Host "Pruebas fallidas:  $testsFail"
 Write-Host ""
 
 if ($testsFail -eq 0) {
-    Write-Host "TODAS LAS PRUEBAS DE REGRESION HAN PASADO"
+    Write-Host "TODAS LAS PRUEBAS FUNCIONALES HAN PASADO"
     exit 0
 }
 else {
-    Write-Host "HAY PRUEBAS DE REGRESION FALLIDAS"
+    Write-Host "HAY PRUEBAS FUNCIONALES FALLIDAS"
     exit 1
 }
