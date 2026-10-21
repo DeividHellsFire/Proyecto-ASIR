@@ -30,6 +30,9 @@ jobs:
       - name: Construir imagen Docker
         run: docker build -t gymtrack:ci .
 
+      - name: Crear red Docker para CI
+        run: docker network create wordpress_default
+
       - name: Levantar entorno Docker
         run: docker compose up -d --build
 
