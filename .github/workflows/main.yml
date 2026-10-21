@@ -24,8 +24,20 @@ jobs:
       - name: Comprobar sintaxis PHP
         run: php -l gymtrack-plugin/gymtrack.php
 
+      - name: Ejecutar pruebas de humo
+        shell: pwsh
+        run: ./tests/smoke-test.ps1
+
       - name: Validar Docker Compose
         run: docker compose config
 
       - name: Construir imagen Docker
         run: docker build -t gymtrack:ci .
+
+      - name: Instalar kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Validar manifiestos Kubernetes
+        run: kubectl apply --dry-run=client -f k8s/
