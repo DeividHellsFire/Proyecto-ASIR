@@ -99,6 +99,33 @@ jobs:
             --admin_email=ci@gymtrack.local \
             --skip-email
 
+      - name: Configurar enlaces permanentes
+        shell: bash
+        run: |
+          docker run --rm \
+            --user 33:33 \
+            -e HOME=/tmp \
+            -e WORDPRESS_DB_HOST=db:3306 \
+            -e WORDPRESS_DB_USER=wordpress \
+            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
+            -e WORDPRESS_DB_NAME=wordpress \
+            --volumes-from gymtrack-wordpress \
+            --network container:gymtrack-wordpress \
+            wordpress:cli-php8.3 \
+            wp rewrite structure '/%postname%/'
+
+          docker run --rm \
+            --user 33:33 \
+            -e HOME=/tmp \
+            -e WORDPRESS_DB_HOST=db:3306 \
+            -e WORDPRESS_DB_USER=wordpress \
+            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
+            -e WORDPRESS_DB_NAME=wordpress \
+            --volumes-from gymtrack-wordpress \
+            --network container:gymtrack-wordpress \
+            wordpress:cli-php8.3 \
+            wp rewrite flush --hard
+
       - name: Activar plugin GymTrack
         shell: bash
         run: |
