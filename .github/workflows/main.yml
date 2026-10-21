@@ -24,15 +24,83 @@ jobs:
       - name: Comprobar sintaxis PHP
         run: php -l gymtrack-plugin/gymtrack.php
 
-      - name: Ejecutar pruebas de humo
-        shell: pwsh
-        run: ./tests/smoke-test.ps1
-
       - name: Validar Docker Compose
         run: docker compose config
 
       - name: Construir imagen Docker
         run: docker build -t gymtrack:ci .
+
+      - name: Levantar entorno Docker
+        run: docker compose up -d --build
+
+      - name: Esperar a WordPress
+        shell: pwsh
+        run: |
+          $maxAttempts = 30
+          $attempt = 0
+
+          do {
+              $attempt++
+
+              try {
+                  $response = Invoke-WebRequest `
+                      -Uri "http://localhost:8082/" `
+                      -Method GET `
+                      -UseBasicParsing `
+                      -TimeoutSec 5
+
+                  if ([int]$response.StatusCode -eq 200) {
+                      Write-Host "WordPress responde correctamente."
+                      break
+                  }
+              }
+              catch {
+                  Write-Host "Esperando a WordPress... intento $attempt/$maxAttempts"
+              }
+
+              Start-Sleep -Seconds 5
+          }
+          while ($attempt -lt $maxAttempts)
+
+          if ($attempt -ge $maxAttempts) {
+              Write-Host "WordPress no respondio dentro del tiempo esperado." -ForegroundColor Red
+              docker compose ps
+              docker compose logs --tail=100 wordpress
+              docker compose logs --tail=100 db
+              exit 1
+          }
+
+      - name: Inicializar WordPress para CI
+        shell: bash
+        run: |
+          docker run --rm \
+            --user 33:33 \
+            -e HOME=/tmp \
+            --volumes-from gymtrack-wordpress \
+            --network container:gymtrack-wordpress \
+            wordpress:cli-php8.3 \
+            core install \
+            --url=http://localhost:8082 \
+            --title="GymTrack CI" \
+            --admin_user=admin \
+            --admin_password="GymTrack_CI_Admin_123!" \
+            --admin_email=ci@gymtrack.local \
+            --skip-email
+
+      - name: Activar plugin GymTrack
+        shell: bash
+        run: |
+          docker run --rm \
+            --user 33:33 \
+            -e HOME=/tmp \
+            --volumes-from gymtrack-wordpress \
+            --network container:gymtrack-wordpress \
+            wordpress:cli-php8.3 \
+            plugin activate gymtrack
+
+      - name: Ejecutar pruebas de humo
+        shell: pwsh
+        run: ./tests/smoke-test.ps1
 
       - name: Instalar kubectl
         uses: azure/setup-kubectl@v4
@@ -41,3 +109,7 @@ jobs:
 
       - name: Validar manifiestos Kubernetes
         run: kubectl apply --dry-run=client -f k8s/
+
+      - name: Apagar entorno Docker
+        if: always()
+        run: docker compose down -v
