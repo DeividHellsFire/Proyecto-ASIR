@@ -33,6 +33,11 @@ jobs:
       - name: Crear red Docker para CI
         run: docker network create wordpress_default
 
+      - name: Crear volumenes Docker para CI
+        run: |
+          docker volume create wordpress_wordpress_data
+          docker volume create wordpress_db_data
+
       - name: Levantar entorno Docker
         run: docker compose up -d --build
 
