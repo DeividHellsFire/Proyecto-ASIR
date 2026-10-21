@@ -145,13 +145,17 @@ jobs:
         shell: pwsh
         run: ./tests/smoke-test.ps1
 
-      - name: Instalar kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: latest
-
       - name: Validar manifiestos Kubernetes
-        run: kubectl apply --dry-run=client --validate=false -f k8s/
+        shell: bash
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            ghcr.io/yannh/kubeconform:v0.8.0 \
+            -summary \
+            -strict \
+            /work/k8s/
 
       - name: Apagar entorno Docker
         if: always()
