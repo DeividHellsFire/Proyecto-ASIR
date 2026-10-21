@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gymtrack
+  namespace: gymtrack
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: gymtrack.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gymtrack-wordpress
+                port:
+                  number: 80

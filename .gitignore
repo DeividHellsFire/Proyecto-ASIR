@@ -16,3 +16,5 @@ Thumbs.db
 gymtrack-backup.sql
 
 gymtrack-plugin/*.backup-*
+
+k8s-backup/

@@ -1,0 +1,170 @@
+﻿apiVersion: v1
+kind: Namespace
+metadata:
+  name: gymtrack
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gymtrack-db-secret
+  namespace: gymtrack
+type: Opaque
+stringData:
+  MYSQL_DATABASE: wordpress
+  MYSQL_USER: wordpress
+  MYSQL_PASSWORD: gymtrack_db_pass
+  MYSQL_ROOT_PASSWORD: gymtrack_root_pass
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gymtrack-db-pvc
+  namespace: gymtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gymtrack-wordpress-pvc
+  namespace: gymtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gymtrack-db
+  namespace: gymtrack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gymtrack-db
+  template:
+    metadata:
+      labels:
+        app: gymtrack-db
+    spec:
+      containers:
+        - name: mariadb
+          image: mariadb:11
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_DATABASE
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_PASSWORD
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_ROOT_PASSWORD
+          volumeMounts:
+            - name: db-data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: gymtrack-db-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gymtrack-db
+  namespace: gymtrack
+spec:
+  selector:
+    app: gymtrack-db
+  ports:
+    - port: 3306
+      targetPort: 3306
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gymtrack-wordpress
+  namespace: gymtrack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gymtrack-wordpress
+  template:
+    metadata:
+      labels:
+        app: gymtrack-wordpress
+    spec:
+      containers:
+        - name: wordpress
+          image: localhost:5001/gymtrack-wordpress:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          env:
+            - name: WORDPRESS_DB_HOST
+              value: gymtrack-db:3306
+            - name: WORDPRESS_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_USER
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_PASSWORD
+            - name: WORDPRESS_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: gymtrack-db-secret
+                  key: MYSQL_DATABASE
+          volumeMounts:
+            - name: wordpress-data
+              mountPath: /var/www/html
+      volumes:
+        - name: wordpress-data
+          persistentVolumeClaim:
+            claimName: gymtrack-wordpress-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gymtrack-wordpress
+  namespace: gymtrack
+spec:
+  selector:
+    app: gymtrack-wordpress
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30082
+  type: NodePort
