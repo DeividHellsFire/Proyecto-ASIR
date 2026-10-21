@@ -91,7 +91,7 @@ jobs:
             --volumes-from gymtrack-wordpress \
             --network container:gymtrack-wordpress \
             wordpress:cli-php8.3 \
-            core install \
+            wp core install \
             --url=http://localhost:8082 \
             --title="GymTrack CI" \
             --admin_user=admin \
@@ -112,7 +112,7 @@ jobs:
             --volumes-from gymtrack-wordpress \
             --network container:gymtrack-wordpress \
             wordpress:cli-php8.3 \
-            plugin activate gymtrack
+            wp plugin activate gymtrack
 
       - name: Ejecutar pruebas de humo
         shell: pwsh
