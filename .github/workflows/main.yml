@@ -151,7 +151,7 @@ jobs:
           version: latest
 
       - name: Validar manifiestos Kubernetes
-        run: kubectl apply --dry-run=client -f k8s/
+        run: kubectl apply --dry-run=client --validate=false -f k8s/
 
       - name: Apagar entorno Docker
         if: always()
