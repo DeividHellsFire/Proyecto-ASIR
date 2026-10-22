@@ -124,8 +124,8 @@ spec:
     spec:
       containers:
         - name: wordpress
-          image: localhost:5001/gymtrack-wordpress:latest
-          imagePullPolicy: Always
+          image: ghcr.io/deividhellsfire/gymtrack-wordpress:sha-3033177
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
           env:
