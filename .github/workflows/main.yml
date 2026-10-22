@@ -1,4 +1,4 @@
-﻿name: GymTrack CI
+﻿name: GymTrack CI/CD
 
 on:
   push:
@@ -8,9 +8,17 @@ on:
     branches:
       - main
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/gymtrack-wordpress
+
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Descargar codigo
@@ -148,8 +156,6 @@ jobs:
       - name: Validar manifiestos Kubernetes
         shell: bash
         run: |
-          echo "${{ github.token }}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
             ghcr.io/yannh/kubeconform:v0.8.0 \
@@ -160,3 +166,40 @@ jobs:
       - name: Apagar entorno Docker
         if: always()
         run: docker compose down -v
+
+  publish-image:
+    needs: test-and-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesion en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preparar metadatos de imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      - name: Construir y publicar imagen Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
