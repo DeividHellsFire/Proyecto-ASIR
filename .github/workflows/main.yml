@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -203,3 +204,39 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  test-self-hosted-runner:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - gymtrack-deploy
+
+    steps:
+      - name: Comprobar runner
+        shell: powershell
+        run: |
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "Sistema operativo: $env:RUNNER_OS"
+          Write-Host "Arquitectura: $env:RUNNER_ARCH"
+
+      - name: Comprobar kubectl
+        shell: powershell
+        run: |
+          kubectl version --client
+
+      - name: Comprobar contexto Kubernetes
+        shell: powershell
+        run: |
+          kubectl config current-context
+
+      - name: Comprobar nodo Kubernetes
+        shell: powershell
+        run: |
+          kubectl get nodes
+
+      - name: Comprobar estado de Kubernetes
+        shell: powershell
+        run: |
+          kubectl get pods -A
