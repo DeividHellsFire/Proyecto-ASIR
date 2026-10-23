@@ -248,3 +248,56 @@ jobs:
         shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           kubectl auth can-i patch deployment/gymtrack-wordpress -n gymtrack
+
+  deploy-kubernetes:
+    needs:
+      - test-and-build
+      - publish-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - gymtrack-deploy
+
+    env:
+      KUBECONFIG: C:\actions-runner\.kube\config
+      IMAGE: ghcr.io/deividhellsfire/gymtrack-wordpress:sha-${{ github.sha }}
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Comprobar contexto Kubernetes
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl config current-context
+
+      - name: Comprobar imagen objetivo
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          Write-Host "Imagen a desplegar: $env:IMAGE"
+
+      - name: Actualizar Deployment de WordPress
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl set image deployment/gymtrack-wordpress `
+            wordpress=$env:IMAGE `
+            -n gymtrack
+
+      - name: Esperar al rollout
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl rollout status deployment/gymtrack-wordpress `
+            -n gymtrack `
+            --timeout=180s
+
+      - name: Verificar Deployment
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl get deployment gymtrack-wordpress -n gymtrack
+
+      - name: Verificar Pods
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl get pods -n gymtrack -l app=gymtrack-wordpress
