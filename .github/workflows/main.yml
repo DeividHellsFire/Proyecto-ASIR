@@ -213,6 +213,9 @@ jobs:
       - X64
       - gymtrack-deploy
 
+    env:
+      KUBECONFIG: C:\actions-runner\.kube\config
+
     steps:
       - name: Comprobar runner
         shell: powershell -ExecutionPolicy Bypass -File {0}
@@ -231,12 +234,17 @@ jobs:
         run: |
           kubectl config current-context
 
-      - name: Comprobar nodo Kubernetes
+      - name: Comprobar acceso a GymTrack
         shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
-          kubectl get nodes
+          kubectl get pods -n gymtrack
 
-      - name: Comprobar estado de Kubernetes
+      - name: Comprobar Deployment de WordPress
         shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
-          kubectl get pods -A
+          kubectl get deployment gymtrack-wordpress -n gymtrack
+
+      - name: Comprobar permiso de despliegue
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+        run: |
+          kubectl auth can-i patch deployment/gymtrack-wordpress -n gymtrack
