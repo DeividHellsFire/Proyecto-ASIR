@@ -215,28 +215,28 @@ jobs:
 
     steps:
       - name: Comprobar runner
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           Write-Host "Runner: $env:RUNNER_NAME"
           Write-Host "Sistema operativo: $env:RUNNER_OS"
           Write-Host "Arquitectura: $env:RUNNER_ARCH"
 
       - name: Comprobar kubectl
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           kubectl version --client
 
       - name: Comprobar contexto Kubernetes
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           kubectl config current-context
 
       - name: Comprobar nodo Kubernetes
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           kubectl get nodes
 
       - name: Comprobar estado de Kubernetes
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         run: |
           kubectl get pods -A
