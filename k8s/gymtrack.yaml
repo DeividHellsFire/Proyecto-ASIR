@@ -50,44 +50,54 @@ metadata:
   namespace: gymtrack
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: gymtrack-db
+
   template:
     metadata:
       labels:
         app: gymtrack-db
+
     spec:
       containers:
         - name: mariadb
           image: mariadb:11
           imagePullPolicy: IfNotPresent
+
           ports:
             - containerPort: 3306
+
           env:
             - name: MYSQL_DATABASE
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_DATABASE
+
             - name: MYSQL_USER
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_USER
+
             - name: MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_PASSWORD
+
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_ROOT_PASSWORD
+
           volumeMounts:
             - name: db-data
               mountPath: /var/lib/mysql
+
       volumes:
         - name: db-data
           persistentVolumeClaim:
@@ -102,6 +112,7 @@ metadata:
 spec:
   selector:
     app: gymtrack-db
+
   ports:
     - port: 3306
       targetPort: 3306
@@ -114,41 +125,75 @@ metadata:
   namespace: gymtrack
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: gymtrack-wordpress
+
   template:
     metadata:
       labels:
         app: gymtrack-wordpress
+
     spec:
+
+      # El PVC existente puede contener el WordPress antiguo.
+      # Solo conservamos de forma persistente la carpeta uploads.
+      # El código de WordPress y GymTrack procede siempre de la
+      # nueva imagen Docker.
+
+      initContainers:
+        - name: prepare-wordpress-uploads
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /bin/sh
+            - -c
+
+          args:
+            - |
+              mkdir -p /wordpress-data/uploads
+
+          volumeMounts:
+            - name: wordpress-data
+              mountPath: /wordpress-data
+
       containers:
         - name: wordpress
-          image: ghcr.io/deividhellsfire/gymtrack-wordpress:sha-3033177
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/deividhellsfire/gymtrack-wordpress:latest
+          imagePullPolicy: Always
+
           ports:
             - containerPort: 80
+
           env:
             - name: WORDPRESS_DB_HOST
               value: gymtrack-db:3306
+
             - name: WORDPRESS_DB_USER
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_USER
+
             - name: WORDPRESS_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_PASSWORD
+
             - name: WORDPRESS_DB_NAME
               valueFrom:
                 secretKeyRef:
                   name: gymtrack-db-secret
                   key: MYSQL_DATABASE
+
           volumeMounts:
             - name: wordpress-data
-              mountPath: /var/www/html
+              mountPath: /var/www/html/wp-content/uploads
+              subPath: uploads
+
       volumes:
         - name: wordpress-data
           persistentVolumeClaim:
@@ -163,8 +208,10 @@ metadata:
 spec:
   selector:
     app: gymtrack-wordpress
+
   ports:
     - port: 80
       targetPort: 80
       nodePort: 30082
+
   type: NodePort

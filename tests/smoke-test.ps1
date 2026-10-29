@@ -198,6 +198,30 @@ Test-Url `
     -Url "$baseUrl/gymtrack/"
 
 # --------------------------------------------------
+# Assets GymTrack
+# --------------------------------------------------
+
+Test-Url `
+    -Name "Imagen GymTrack Inicio" `
+    -Url "$baseUrl/wp-content/plugins/gymtrack/assets/gymtrack-home.jpg"
+
+Test-Url `
+    -Name "Imagen GymTrack Registra" `
+    -Url "$baseUrl/wp-content/plugins/gymtrack/assets/gymtrack-registra.jpg"
+
+Test-Url `
+    -Name "Imagen GymTrack Analiza" `
+    -Url "$baseUrl/wp-content/plugins/gymtrack/assets/gymtrack-analiza.jpg"
+
+Test-Url `
+    -Name "Imagen GymTrack Superate" `
+    -Url "$baseUrl/wp-content/plugins/gymtrack/assets/gymtrack-superate.jpg"
+
+Test-Url `
+    -Name "Imagen GymTrack Buscar" `
+    -Url "$baseUrl/wp-content/plugins/gymtrack/assets/gymtrack-buscar.jpg"
+
+# --------------------------------------------------
 # WordPress REST API
 # --------------------------------------------------
 
@@ -264,4 +288,5 @@ if ($testsFailed -gt 0) {
 
 Write-Host ""
 Write-Host "TODAS LAS PRUEBAS HAN PASADO" -ForegroundColor Green
+
 exit 0

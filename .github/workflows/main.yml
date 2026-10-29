@@ -152,7 +152,8 @@ jobs:
 
       - name: Ejecutar pruebas de humo
         shell: pwsh
-        run: ./tests/smoke-test.ps1
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/smoke-test.ps1"
 
       - name: Validar manifiestos Kubernetes
         shell: bash
@@ -166,7 +167,7 @@ jobs:
 
       - name: Apagar entorno Docker
         if: always()
-        run: docker compose down -v
+        run: docker compose down
 
   publish-image:
     needs: test-and-build

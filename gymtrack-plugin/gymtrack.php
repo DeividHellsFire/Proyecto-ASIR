@@ -492,18 +492,21 @@ function gymtrack_rest_test_page() {
  * =========================================================
  * LIMPIEZA DE LA NAVEGACIÓN PÚBLICA
  * =========================================================
- * Oculta la antigua página de ejemplo de WordPress del menú público.
- * Se mantienen únicamente las páginas propias de GymTrack.
+ * Elimina la antigua página de ejemplo de WordPress de la navegación
+ * pública, tanto en menús clásicos como en navegación basada en bloques.
+ * Se mantienen las páginas funcionales de GymTrack.
  */
 
 function gymtrack_remove_default_example_page_from_menu( $items, $args ) {
 
     foreach ( $items as $key => $item ) {
-        $url = isset( $item->url ) ? (string) $item->url : '';
+        $url   = isset( $item->url ) ? (string) $item->url : '';
         $title = isset( $item->title ) ? trim( wp_strip_all_tags( $item->title ) ) : '';
 
         if (
             false !== strpos( $url, 'page_id=2' ) ||
+            false !== strpos( $url, '/pagina-de-ejemplo' ) ||
+            false !== strpos( $url, '/sample-page' ) ||
             'Página de ejemplo' === $title
         ) {
             unset( $items[ $key ] );
@@ -521,25 +524,145 @@ add_filter(
 );
 
 /**
- * Twenty Twenty-Five utiliza navegación basada en bloques en algunas
- * configuraciones. Este CSS actúa como segunda barrera para que la página
- * de ejemplo no vuelva a aparecer en el menú público.
+ * Twenty Twenty-Five puede utilizar core/navigation-link. En ese caso el
+ * menú no pasa por wp_nav_menu_objects, por lo que filtramos el bloque
+ * directamente antes de renderizarlo.
  */
-function gymtrack_hide_default_example_page_from_block_navigation() {
-    ?>
-    <style id="gymtrack-public-navigation">
-        a[href*="page_id=2"] {
-            display: none !important;
-        }
-    </style>
-    <?php
+function gymtrack_remove_default_example_page_from_block_navigation( $block_content, $block ) {
+
+    if (
+        empty( $block['blockName'] ) ||
+        'core/navigation-link' !== $block['blockName']
+    ) {
+        return $block_content;
+    }
+
+    $attrs = isset( $block['attrs'] ) && is_array( $block['attrs'] )
+        ? $block['attrs']
+        : array();
+
+    $label = isset( $attrs['label'] )
+        ? trim( wp_strip_all_tags( $attrs['label'] ) )
+        : '';
+
+    $url = isset( $attrs['url'] ) ? (string) $attrs['url'] : '';
+
+    if (
+        'Página de ejemplo' === $label ||
+        false !== strpos( $url, 'page_id=2' ) ||
+        false !== strpos( $url, '/pagina-de-ejemplo' ) ||
+        false !== strpos( $url, '/sample-page' )
+    ) {
+        return '';
+    }
+
+    return $block_content;
 }
 
-add_action(
-    'wp_head',
-    'gymtrack_hide_default_example_page_from_block_navigation',
-    100
+add_filter(
+    'render_block_core/navigation-link',
+    'gymtrack_remove_default_example_page_from_block_navigation',
+    20,
+    2
 );
+
+/**
+ * =========================================================
+ * FLUJO DE ACCESO DEL FRONT-END
+ * =========================================================
+ *
+ * GymTrack funciona como una aplicacion web dentro de WordPress.
+ *
+ * - Usuario no autenticado en la portada: va al login de WordPress.
+ * - Usuario autenticado en la portada: ve el dashboard de GymTrack.
+ * - Paginas funcionales de GymTrack: requieren autenticacion.
+ * - Tras iniciar sesion se conserva un redirect_to seguro cuando existe;
+ *   en caso contrario se utiliza la portada de GymTrack.
+ * - El area /wp-admin/ sigue disponible para los administradores.
+ */
+function gymtrack_frontend_auth_redirect() {
+
+    if (
+        is_admin() ||
+        wp_doing_ajax() ||
+        wp_doing_cron() ||
+        ( function_exists( 'wp_doing_rest' ) && wp_doing_rest() )
+    ) {
+        return;
+    }
+
+    global $pagenow;
+
+    if ( 'wp-login.php' === $pagenow ) {
+        return;
+    }
+
+    $protected_slugs = array(
+        'gymtrack',
+        'gymtrack-registrar',
+        'gymtrack-historial',
+        'gymtrack-progreso',
+        'gymtrack-biblioteca',
+    );
+
+    $is_gymtrack_page = false;
+
+    foreach ( $protected_slugs as $slug ) {
+        if ( is_page( $slug ) ) {
+            $is_gymtrack_page = true;
+            break;
+        }
+    }
+
+    if ( ! is_front_page() && ! $is_gymtrack_page ) {
+        return;
+    }
+
+    if ( ! is_user_logged_in() ) {
+        $request_uri = isset( $_SERVER['REQUEST_URI'] )
+            ? wp_unslash( $_SERVER['REQUEST_URI'] )
+            : '/';
+
+        $redirect_to = home_url( $request_uri );
+        $login_url   = wp_login_url( $redirect_to );
+
+        wp_safe_redirect( $login_url );
+        exit;
+    }
+
+    if ( ! gymtrack_can_use() ) {
+        wp_safe_redirect( home_url( '/' ) );
+        exit;
+    }
+}
+
+add_action( 'template_redirect', 'gymtrack_frontend_auth_redirect', 1 );
+
+
+/**
+ * Tras un login correcto, GymTrack utiliza la portada de la aplicacion
+ * como destino por defecto. Si WordPress ya proporciono un redirect_to
+ * seguro (por ejemplo, desde /wp-admin/), se respeta ese destino.
+ */
+function gymtrack_login_redirect( $redirect_to, $requested_redirect_to, $user ) {
+
+    if ( is_wp_error( $user ) || ! ( $user instanceof WP_User ) ) {
+        return $redirect_to;
+    }
+
+    if ( ! empty( $requested_redirect_to ) ) {
+        $safe_redirect = wp_validate_redirect( $requested_redirect_to, '' );
+
+        if ( '' !== $safe_redirect ) {
+            return $safe_redirect;
+        }
+    }
+
+    return home_url( '/' );
+}
+
+add_filter( 'login_redirect', 'gymtrack_login_redirect', 10, 3 );
+
 
 /**
  * =========================================================
@@ -636,165 +759,792 @@ function gymtrack_frontend_dashboard_shortcode() {
     ob_start();
     ?>
 
+    <?php
+    $gymtrack_home_url       = home_url( '/' );
+    $gymtrack_register_url   = gymtrack_frontend_page_url( 'gymtrack-registrar' );
+    $gymtrack_history_url    = gymtrack_frontend_page_url( 'gymtrack-historial' );
+    $gymtrack_progress_url   = gymtrack_frontend_page_url( 'gymtrack-progreso' );
+    $gymtrack_library_url    = gymtrack_frontend_page_url( 'gymtrack-biblioteca' );
+    $gymtrack_logout_url     = wp_logout_url( $gymtrack_home_url );
+    $gymtrack_user_name      = wp_get_current_user()->display_name ?: wp_get_current_user()->user_login;
+    $gymtrack_background_url = plugins_url( 'assets/gymtrack-home.jpg', __FILE__ );
+    $gymtrack_registra_image_url  = gymtrack_frontend_asset_url( 'assets/gymtrack-registra.jpg' );
+    $gymtrack_analiza_image_url   = gymtrack_frontend_asset_url( 'assets/gymtrack-analiza.jpg' );
+    $gymtrack_superate_image_url  = gymtrack_frontend_asset_url( 'assets/gymtrack-superate.jpg' );
+    $gymtrack_buscar_image_url    = gymtrack_frontend_asset_url( 'assets/gymtrack-buscar.jpg' );
+    ?>
     <style>
-        .gymtrack-dashboard {
-            max-width: 1100px;
-            margin: 30px auto;
-            padding: 0 20px;
-            font-family: inherit;
+        /* =====================================================
+         * GYMTRACK — PORTADA VISUAL
+         * ===================================================== */
+        body.gymtrack-home-page {
+            background: #07090b !important;
+            color: #f5f5f5;
         }
-        .gymtrack-dashboard h1 {
-            margin-bottom: 8px;
+
+        body.gymtrack-home-page header.wp-block-template-part,
+        body.gymtrack-home-page .wp-site-blocks > header,
+        body.gymtrack-home-page .entry-header,
+        body.gymtrack-home-page .wp-block-post-title,
+        body.gymtrack-home-page .entry-title,
+        body.gymtrack-home-page > footer,
+        body.gymtrack-home-page .wp-site-blocks > footer {
+            display: none !important;
         }
-        .gymtrack-dashboard .gymtrack-subtitle {
-            margin-bottom: 25px;
-            color: #666;
+
+        body.gymtrack-home-page .wp-site-blocks,
+        body.gymtrack-home-page .site-content,
+        body.gymtrack-home-page main,
+        body.gymtrack-home-page .entry-content {
+            margin: 0 !important;
+            padding: 0 !important;
+            max-width: none !important;
         }
-        .gymtrack-dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 20px;
-            margin-bottom: 25px;
+
+        body.gymtrack-home-page .gymtrack-dashboard {
+            width: 100%;
+            max-width: 100%;
+            max-width: none;
+            margin: 0;
+            padding: 0;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            color: #f6f7f8;
+            box-sizing: border-box;
+            overflow: hidden;
+            background: #07090b;
         }
-        .gymtrack-card {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 20px;
+
+        body.gymtrack-home-page .gymtrack-dashboard *,
+        body.gymtrack-home-page .gymtrack-dashboard *::before,
+        body.gymtrack-home-page .gymtrack-dashboard *::after {
             box-sizing: border-box;
         }
-        .gymtrack-stat {
-            font-size: 32px;
-            font-weight: 700;
-            margin: 8px 0 0;
+
+        .gymtrack-home-hero {
+            position: relative;
+            min-height: calc(100vh - 32px);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            isolation: isolate;
+            background:
+                linear-gradient(90deg, rgba(3,5,7,.94) 0%, rgba(3,5,7,.78) 34%, rgba(3,5,7,.28) 68%, rgba(3,5,7,.44) 100%),
+                linear-gradient(180deg, rgba(0,0,0,.50) 0%, rgba(0,0,0,.05) 36%, rgba(0,0,0,.80) 100%),
+                url('<?php echo esc_url( $gymtrack_background_url ); ?>') center center / cover no-repeat;
         }
-        .gymtrack-stat-label {
-            color: #666;
-            margin: 0;
+
+        .gymtrack-home-hero::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at 58% 48%, rgba(255, 126, 0, .10), transparent 32%),
+                linear-gradient(90deg, rgba(255,126,0,.07), transparent 25%);
         }
-        .gymtrack-dashboard table {
+
+        .gymtrack-home-nav {
+            position: relative;
+            z-index: 5;
+            width: min(1380px, calc(100% - 64px));
+            margin: 24px auto 0;
+            padding: 14px 20px 14px 26px;
+            min-height: 70px;
+            display: flex;
+            align-items: center;
+            gap: 30px;
+            border: 1px solid rgba(255,255,255,.09);
+            border-radius: 22px;
+            background: rgba(7,9,11,.84);
+            backdrop-filter: blur(16px);
+            box-shadow: 0 18px 55px rgba(0,0,0,.34);
+        }
+
+        .gymtrack-home-logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 11px;
+            margin-right: auto;
+            color: #fff !important;
+            text-decoration: none !important;
+            font-weight: 900;
+            font-size: 27px;
+            line-height: 1;
+            letter-spacing: -1.4px;
+            white-space: nowrap;
+        }
+
+        .gymtrack-home-logo-mark {
+            width: 35px;
+            height: 35px;
+            display: grid;
+            place-items: center;
+            color: #ff8614;
+            filter: drop-shadow(0 0 9px rgba(255,126,0,.35));
+        }
+
+        .gymtrack-home-logo-mark svg {
             width: 100%;
-            border-collapse: collapse;
+            height: 100%;
+            fill: currentColor;
         }
-        .gymtrack-dashboard th,
-        .gymtrack-dashboard td {
-            padding: 10px;
-            border-bottom: 1px solid #eee;
-            text-align: left;
+
+        .gymtrack-home-logo-accent {
+            color: #ff8614;
         }
-        .gymtrack-dashboard .gymtrack-actions {
+
+        .gymtrack-home-links {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+        }
+
+        .gymtrack-home-links a {
+            position: relative;
+            padding: 13px 0;
+            color: rgba(255,255,255,.82) !important;
+            text-decoration: none !important;
+            font-size: 15px;
+            font-weight: 600;
+            transition: color .2s ease;
+        }
+
+        .gymtrack-home-links a:hover,
+        .gymtrack-home-links a.gymtrack-home-active {
+            color: #fff !important;
+        }
+
+        .gymtrack-home-links a.gymtrack-home-active::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 3px;
+            height: 3px;
+            border-radius: 99px;
+            background: #ff8614;
+            box-shadow: 0 0 10px rgba(255,126,0,.55);
+        }
+
+        .gymtrack-home-user {
+            display: flex;
+            align-items: center;
+            gap: 13px;
+            margin-left: 5px;
+        }
+
+        .gymtrack-home-user a {
+            color: #fff !important;
+            text-decoration: none !important;
+        }
+
+        .gymtrack-home-user-icon,
+        .gymtrack-home-logout-icon {
+            width: 28px;
+            height: 28px;
+            display: grid;
+            place-items: center;
+        }
+
+        .gymtrack-home-user-icon svg,
+        .gymtrack-home-logout-icon svg {
+            width: 24px;
+            height: 24px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .gymtrack-home-logout-icon {
+            color: #ff8614;
+        }
+
+        .gymtrack-home-content {
+            position: relative;
+            z-index: 2;
+            width: min(1380px, calc(100% - 64px));
+            margin: 0 auto;
+            padding: clamp(55px, 8vh, 105px) 0 38px;
+        }
+
+        .gymtrack-home-kicker {
+            margin: 0 0 8px;
+            color: rgba(255,255,255,.92);
+            font-size: clamp(13px, 1.1vw, 17px);
+            font-weight: 500;
+            letter-spacing: .30em;
+            text-transform: uppercase;
+        }
+
+        .gymtrack-home-title {
+            margin: 0 !important;
+            font-family: Impact, Haettenschweiler, "Arial Black", sans-serif !important;
+            font-size: clamp(74px, 10vw, 152px) !important;
+            line-height: .82 !important;
+            letter-spacing: -.055em !important;
+            text-transform: uppercase;
+            color: #fff !important;
+            text-shadow: 0 10px 38px rgba(0,0,0,.38);
+        }
+
+        .gymtrack-home-title span {
+            color: #ff8614;
+        }
+
+        .gymtrack-home-tagline {
+            margin: 18px 0 0 !important;
+            color: #fff !important;
+            font-size: clamp(23px, 2.2vw, 38px) !important;
+            line-height: 1 !important;
+            font-weight: 800 !important;
+            letter-spacing: .18em;
+            text-transform: uppercase;
+        }
+
+        .gymtrack-home-tagline span {
+            color: #ff8614;
+        }
+
+        .gymtrack-home-description {
+            max-width: 650px;
+            margin: 25px 0 0 !important;
+            color: rgba(255,255,255,.78) !important;
+            font-size: 17px;
+            line-height: 1.65;
+        }
+
+        .gymtrack-home-actions {
             display: flex;
             flex-wrap: wrap;
-            gap: 10px;
-            margin-top: 15px;
+            gap: 15px;
+            margin-top: 30px;
         }
-        .gymtrack-dashboard .gymtrack-button {
-            display: inline-block;
+
+        .gymtrack-home-cta {
+            position: relative;
+            min-width: 205px;
+            min-height: 62px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 11px;
+            padding: 9px 15px;
+            border-radius: 17px;
+            overflow: hidden;
+            isolation: isolate;
+            text-decoration: none !important;
+            font-size: 14px;
+            font-weight: 850;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+            transition: transform .2s ease, box-shadow .2s ease, background .2s ease;
+            background-position: center;
+            background-size: cover;
+            background-repeat: no-repeat;
+        }
+
+        .gymtrack-home-cta::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            z-index: -1;
+            background: linear-gradient(90deg, rgba(5,7,9,.94) 0%, rgba(5,7,9,.72) 46%, rgba(5,7,9,.35) 100%);
+            pointer-events: none;
+        }
+
+        .gymtrack-home-cta-register {
+            background-image: url('<?php echo esc_url( $gymtrack_registra_image_url ); ?>');
+        }
+
+        .gymtrack-home-cta-history {
+            background-image: url('<?php echo esc_url( $gymtrack_analiza_image_url ); ?>');
+        }
+
+        .gymtrack-home-cta-progress {
+            background-image: url('<?php echo esc_url( $gymtrack_superate_image_url ); ?>');
+        }
+
+        .gymtrack-home-cta-library {
+            background-image: url('<?php echo esc_url( $gymtrack_buscar_image_url ); ?>');
+        }
+
+        .gymtrack-home-cta > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .gymtrack-home-cta-thumb {
+            display: block !important;
+            width: 46px;
+            height: 44px;
+            flex: 0 0 46px;
+            object-fit: cover;
+            border-radius: 9px;
+            border: 1px solid rgba(255,255,255,.24);
+            box-shadow: 0 5px 14px rgba(0,0,0,.28);
+        }
+
+        .gymtrack-home-cta-label {
+            flex: 1 1 auto;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .gymtrack-home-cta .gymtrack-home-arrow {
+            flex: 0 0 auto;
+            margin-left: auto;
+        }
+
+        .gymtrack-home-cta:hover {
+            transform: translateY(-2px);
+        }
+
+        .gymtrack-home-cta-register {
+            box-shadow: 0 12px 32px rgba(255,115,0,.28);
+        }
+
+        .gymtrack-home-cta-register::before {
+            background: linear-gradient(90deg, rgba(255,126,0,.92) 0%, rgba(255,111,0,.66) 48%, rgba(12,14,16,.30) 100%);
+        }
+
+        .gymtrack-home-cta-register:hover {
+            color: #fff !important;
+            box-shadow: 0 16px 38px rgba(255,115,0,.40);
+        }
+
+        .gymtrack-home-cta-history,
+        .gymtrack-home-cta-progress,
+        .gymtrack-home-cta-library {
+            border: 1px solid rgba(255,255,255,.38);
+            background-color: rgba(10,12,14,.25);
+            backdrop-filter: blur(7px);
+        }
+
+        .gymtrack-home-cta-history:hover,
+        .gymtrack-home-cta-progress:hover,
+        .gymtrack-home-cta-library:hover {
+            color: #fff !important;
+            background-color: rgba(255,255,255,.10);
+        }
+
+        .gymtrack-home-arrow {
+            font-size: 22px;
+            line-height: 1;
+        }
+
+        .gymtrack-home-motto {
+            position: absolute;
+            right: 0;
+            top: 41%;
+            width: 230px;
+            padding-left: 22px;
+            border-left: 3px solid #ff8614;
+            color: rgba(255,255,255,.85);
+            font-size: 18px;
+            line-height: 1.25;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .02em;
+        }
+
+        .gymtrack-home-motto strong {
+            display: block;
+            margin-top: 10px;
+            color: #ff8614;
+            font-size: 10px;
+            letter-spacing: .25em;
+        }
+
+        /* =====================================================
+         * DATOS DEL USUARIO — SEGUNDA SECCIÓN
+         * ===================================================== */
+        .gymtrack-home-data {
+            width: min(1180px, calc(100% - 48px));
+            margin: 0 auto;
+            padding: 70px 0 90px;
+        }
+
+        .gymtrack-home-section-heading {
+            margin-bottom: 28px;
+        }
+
+        .gymtrack-home-section-kicker {
+            margin: 0 0 7px !important;
+            color: #ff8614 !important;
+            font-size: 12px !important;
+            font-weight: 800 !important;
+            letter-spacing: .22em;
+            text-transform: uppercase;
+        }
+
+        .gymtrack-home-section-title {
+            margin: 0 !important;
+            color: #fff !important;
+            font-size: clamp(30px, 4vw, 46px) !important;
+            line-height: 1 !important;
+            font-weight: 850 !important;
+        }
+
+        .gymtrack-home-welcome {
+            margin: 9px 0 0 !important;
+            color: rgba(255,255,255,.58) !important;
+        }
+
+        .gymtrack-home-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        .gymtrack-home-stat-card,
+        .gymtrack-home-data-card {
+            border: 1px solid rgba(255,255,255,.09);
+            border-radius: 20px;
+            background: linear-gradient(145deg, rgba(24,27,30,.96), rgba(13,15,17,.96));
+            box-shadow: 0 15px 45px rgba(0,0,0,.20);
+        }
+
+        .gymtrack-home-stat-card {
+            padding: 25px 28px;
+        }
+
+        .gymtrack-home-stat-label {
+            margin: 0 !important;
+            color: rgba(255,255,255,.58) !important;
+            font-size: 13px !important;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        .gymtrack-home-stat {
+            margin: 7px 0 0 !important;
+            color: #ff8614 !important;
+            font-size: 42px !important;
+            line-height: 1 !important;
+            font-weight: 900 !important;
+        }
+
+        .gymtrack-home-data-card {
+            margin-bottom: 18px;
+            padding: 27px;
+            overflow: hidden;
+        }
+
+        .gymtrack-home-data-card h2 {
+            margin: 0 0 20px !important;
+            color: #fff !important;
+            font-size: 22px !important;
+        }
+
+        .gymtrack-home-data-card table {
+            width: 100%;
+            border-collapse: collapse;
+            color: rgba(255,255,255,.82);
+        }
+
+        .gymtrack-home-data-card th,
+        .gymtrack-home-data-card td {
+            padding: 13px 10px;
+            border-bottom: 1px solid rgba(255,255,255,.08);
+            text-align: left;
+        }
+
+        .gymtrack-home-data-card th {
+            color: #ff8614;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        .gymtrack-home-data-card td {
+            font-size: 14px;
+        }
+
+        .gymtrack-home-empty {
+            color: rgba(255,255,255,.56) !important;
+        }
+
+        .gymtrack-home-quick-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 11px;
+        }
+
+        .gymtrack-home-quick-actions a {
+            display: inline-flex;
+            align-items: center;
+            min-height: 45px;
             padding: 10px 16px;
-            border-radius: 5px;
-            background: #2271b1;
-            color: #fff;
-            text-decoration: none;
+            border: 1px solid rgba(255,255,255,.14);
+            border-radius: 12px;
+            color: #fff !important;
+            background: rgba(255,255,255,.04);
+            text-decoration: none !important;
+            font-size: 13px;
+            font-weight: 700;
         }
-        .gymtrack-dashboard .gymtrack-button:hover {
-            color: #fff;
-            opacity: .9;
+
+        .gymtrack-home-quick-actions a:hover {
+            border-color: rgba(255,134,20,.65);
+            color: #ff9a28 !important;
         }
-        .gymtrack-dashboard .gymtrack-empty {
-            color: #666;
+
+        @media (max-width: 1050px) {
+            .gymtrack-home-links {
+                gap: 18px;
+            }
+
+            .gymtrack-home-links a {
+                font-size: 13px;
+            }
+
+            .gymtrack-home-motto {
+                display: none;
+            }
+
         }
-        @media (max-width: 700px) {
-            .gymtrack-dashboard-grid {
+
+        @media (max-width: 760px) {
+            .gymtrack-home-nav,
+            .gymtrack-home-content {
+                width: min(100% - 28px, 1380px);
+            }
+
+            .gymtrack-home-nav {
+                margin-top: 14px;
+                padding: 12px 15px;
+                border-radius: 17px;
+            }
+
+            .gymtrack-home-logo {
+                font-size: 22px;
+            }
+
+            .gymtrack-home-links {
+                display: none;
+            }
+
+            .gymtrack-home-content {
+                padding-top: 65px;
+            }
+
+            .gymtrack-home-title {
+                font-size: clamp(63px, 19vw, 112px) !important;
+            }
+
+            .gymtrack-home-tagline {
+                font-size: 20px !important;
+                letter-spacing: .08em;
+            }
+
+            .gymtrack-home-description {
+                font-size: 15px;
+            }
+
+            .gymtrack-home-actions {
+                flex-direction: column;
+            }
+
+            .gymtrack-home-cta {
+                width: 100%;
+                min-height: 58px;
+            }
+
+            .gymtrack-home-cta-thumb {
+                width: 42px;
+                height: 40px;
+                flex-basis: 42px;
+            }
+
+            .gymtrack-home-stat-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .gymtrack-home-data {
+                width: calc(100% - 28px);
+                padding-top: 50px;
+            }
+
+            .gymtrack-home-data-card {
+                overflow-x: auto;
+            }
+
+            .gymtrack-home-data-card table {
+                min-width: 620px;
             }
         }
     </style>
 
     <div class="gymtrack-dashboard">
-        <h1>GymTrack</h1>
-        <p class="gymtrack-subtitle">
-            Bienvenido, <?php echo esc_html( wp_get_current_user()->display_name ?: wp_get_current_user()->user_login ); ?>.
-        </p>
+        <section class="gymtrack-home-hero">
+            <nav class="gymtrack-home-nav" aria-label="Navegación principal">
+                <a class="gymtrack-home-logo" href="<?php echo esc_url( $gymtrack_home_url ); ?>">
+                    <span class="gymtrack-home-logo-mark" aria-hidden="true">
+                        <svg viewBox="0 0 64 64">
+                            <path d="M12 24h8v16h-8c-2.2 0-4-1.8-4-4V28c0-2.2 1.8-4 4-4Zm32 0h8c2.2 0 4 1.8 4 4v8c0 2.2-1.8 4-4 4h-8V24ZM23 28h18v8H23v-8Zm-9-12h6v8h-6v-8Zm31 0h6v8h-6v-8Zm-31 32h6v8h-6v-8Zm31 0h6v8h-6v-8Z"/>
+                        </svg>
+                    </span>
+                    <span>GYM<span class="gymtrack-home-logo-accent">TRACK</span></span>
+                </a>
 
-        <div class="gymtrack-dashboard-grid">
-            <div class="gymtrack-card">
-                <p class="gymtrack-stat-label">Entrenamientos registrados</p>
-                <p class="gymtrack-stat"><?php echo esc_html( $total_workouts ); ?></p>
+                <div class="gymtrack-home-links">
+                    <a class="gymtrack-home-active" href="<?php echo esc_url( $gymtrack_home_url ); ?>">Inicio</a>
+                    <a href="<?php echo esc_url( $gymtrack_register_url ); ?>">Entrenamientos</a>
+                    <a href="<?php echo esc_url( $gymtrack_history_url ); ?>">Historial</a>
+                    <a href="<?php echo esc_url( $gymtrack_progress_url ); ?>">Progreso</a>
+                    <a href="<?php echo esc_url( $gymtrack_library_url ); ?>">Biblioteca</a>
+                </div>
+
+                <div class="gymtrack-home-user">
+                    <span class="gymtrack-home-user-icon" title="<?php echo esc_attr( $gymtrack_user_name ); ?>" aria-label="<?php echo esc_attr( $gymtrack_user_name ); ?>">
+                        <svg viewBox="0 0 24 24">
+                            <circle cx="12" cy="8" r="3.2"></circle>
+                            <path d="M5.5 20c.8-3.5 3-5.2 6.5-5.2s5.7 1.7 6.5 5.2"></path>
+                        </svg>
+                    </span>
+                    <a class="gymtrack-home-logout-icon" href="<?php echo esc_url( $gymtrack_logout_url ); ?>" title="Cerrar sesión" aria-label="Cerrar sesión">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M9 5H5.5A1.5 1.5 0 0 0 4 6.5v11A1.5 1.5 0 0 0 5.5 19H9"></path>
+                            <path d="M14 8l4 4-4 4"></path>
+                            <path d="M18 12H9"></path>
+                        </svg>
+                    </a>
+                </div>
+            </nav>
+
+            <div class="gymtrack-home-content">
+                <p class="gymtrack-home-kicker">Tu progreso, nuestro objetivo</p>
+                <h1 class="gymtrack-home-title">GYM<span>TRACK</span></h1>
+                <p class="gymtrack-home-tagline">Entrena<span>.</span> Registra<span>.</span> Supérate<span>.</span></p>
+                <p class="gymtrack-home-description">
+                    Lleva el control de tus entrenamientos, analiza tu progreso
+                    y alcanza tu mejor versión.
+                </p>
+
+                <div class="gymtrack-home-actions">
+                    <a class="gymtrack-home-cta gymtrack-home-cta-register" href="<?php echo esc_url( $gymtrack_register_url ); ?>">
+                        <img class="gymtrack-home-cta-thumb" src="<?php echo esc_url( $gymtrack_registra_image_url ); ?>" alt="">
+                        <span class="gymtrack-home-cta-label">Registra</span>
+                        <span class="gymtrack-home-arrow" aria-hidden="true">›</span>
+                    </a>
+                    <a class="gymtrack-home-cta gymtrack-home-cta-history" href="<?php echo esc_url( $gymtrack_history_url ); ?>">
+                        <img class="gymtrack-home-cta-thumb" src="<?php echo esc_url( $gymtrack_analiza_image_url ); ?>" alt="">
+                        <span class="gymtrack-home-cta-label">Analiza</span>
+                        <span class="gymtrack-home-arrow" aria-hidden="true">›</span>
+                    </a>
+                    <a class="gymtrack-home-cta gymtrack-home-cta-progress" href="<?php echo esc_url( $gymtrack_progress_url ); ?>">
+                        <img class="gymtrack-home-cta-thumb" src="<?php echo esc_url( $gymtrack_superate_image_url ); ?>" alt="">
+                        <span class="gymtrack-home-cta-label">Supérate</span>
+                        <span class="gymtrack-home-arrow" aria-hidden="true">›</span>
+                    </a>
+                    <a class="gymtrack-home-cta gymtrack-home-cta-library" href="<?php echo esc_url( $gymtrack_library_url ); ?>">
+                        <img class="gymtrack-home-cta-thumb" src="<?php echo esc_url( $gymtrack_buscar_image_url ); ?>" alt="">
+                        <span class="gymtrack-home-cta-label">Buscar ejercicios</span>
+                        <span class="gymtrack-home-arrow" aria-hidden="true">›</span>
+                    </a>
+                </div>
+
+                <div class="gymtrack-home-motto">
+                    Disciplina hoy<br>
+                    resultados mañana
+                    <strong>GymTrack</strong>
+                </div>
             </div>
-            <div class="gymtrack-card">
-                <p class="gymtrack-stat-label">Ejercicios realizados</p>
-                <p class="gymtrack-stat"><?php echo esc_html( $total_exercises ); ?></p>
+
+        </section>
+
+        <section class="gymtrack-home-data">
+            <div class="gymtrack-home-section-heading">
+                <p class="gymtrack-home-section-kicker">Tu actividad</p>
+                <h2 class="gymtrack-home-section-title">Tu progreso empieza aquí.</h2>
+                <p class="gymtrack-home-welcome">
+                    Bienvenido, <?php echo esc_html( $gymtrack_user_name ); ?>.
+                </p>
             </div>
-        </div>
 
-        <div class="gymtrack-card" style="margin-bottom:20px;">
-            <h2>Últimos entrenamientos</h2>
+            <div class="gymtrack-home-stat-grid">
+                <div class="gymtrack-home-stat-card">
+                    <p class="gymtrack-home-stat-label">Entrenamientos registrados</p>
+                    <p class="gymtrack-home-stat"><?php echo esc_html( $total_workouts ); ?></p>
+                </div>
+                <div class="gymtrack-home-stat-card">
+                    <p class="gymtrack-home-stat-label">Ejercicios realizados</p>
+                    <p class="gymtrack-home-stat"><?php echo esc_html( $total_exercises ); ?></p>
+                </div>
+            </div>
 
-            <?php if ( empty( $recent_workouts ) ) : ?>
-                <p class="gymtrack-empty">Todavía no tienes entrenamientos registrados.</p>
-            <?php else : ?>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Fecha</th>
-                            <th>Ejercicio</th>
-                            <th>Peso</th>
-                            <th>Series</th>
-                            <th>Repeticiones</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ( $recent_workouts as $workout ) : ?>
+            <div class="gymtrack-home-data-card">
+                <h2>Últimos entrenamientos</h2>
+                <?php if ( empty( $recent_workouts ) ) : ?>
+                    <p class="gymtrack-home-empty">Todavía no tienes entrenamientos registrados.</p>
+                <?php else : ?>
+                    <table>
+                        <thead>
                             <tr>
-                                <td><?php echo esc_html( $workout->workout_date ); ?></td>
-                                <td><?php echo esc_html( $workout->exercise_name ); ?></td>
-                                <td><?php echo esc_html( number_format_i18n( (float) $workout->weight, 2 ) ); ?> kg</td>
-                                <td><?php echo esc_html( $workout->sets ); ?></td>
-                                <td><?php echo esc_html( $workout->repetitions ); ?></td>
+                                <th>Fecha</th>
+                                <th>Ejercicio</th>
+                                <th>Peso</th>
+                                <th>Series</th>
+                                <th>Repeticiones</th>
                             </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
-        </div>
-
-        <div class="gymtrack-card" style="margin-bottom:20px;">
-            <h2>Mejores marcas</h2>
-
-            <?php if ( empty( $best_marks ) ) : ?>
-                <p class="gymtrack-empty">Todavía no tienes marcas registradas.</p>
-            <?php else : ?>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Ejercicio</th>
-                            <th>Mejor peso</th>
-                            <th>Fecha</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ( $best_marks as $mark ) : ?>
-                            <tr>
-                                <td><?php echo esc_html( $mark->exercise_name ); ?></td>
-                                <td><?php echo esc_html( number_format_i18n( (float) $mark->weight, 2 ) ); ?> kg</td>
-                                <td><?php echo esc_html( $mark->workout_date ); ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
-        </div>
-
-        <div class="gymtrack-card">
-            <h2>Acciones rápidas</h2>
-            <div class="gymtrack-actions">
-                <a class="gymtrack-button" href="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-registrar' ) ); ?>">Registrar entrenamiento</a>
-                <a class="gymtrack-button" href="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-historial' ) ); ?>">Ver historial</a>
-                <a class="gymtrack-button" href="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-progreso' ) ); ?>">Ver progreso</a>
-                <a class="gymtrack-button" href="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-biblioteca' ) ); ?>">Biblioteca de ejercicios</a>
+                        </thead>
+                        <tbody>
+                            <?php foreach ( $recent_workouts as $workout ) : ?>
+                                <tr>
+                                    <td><?php echo esc_html( $workout->workout_date ); ?></td>
+                                    <td><?php echo esc_html( $workout->exercise_name ); ?></td>
+                                    <td><?php echo esc_html( number_format_i18n( (float) $workout->weight, 2 ) ); ?> kg</td>
+                                    <td><?php echo esc_html( $workout->sets ); ?></td>
+                                    <td><?php echo esc_html( $workout->repetitions ); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
             </div>
-        </div>
+
+            <div class="gymtrack-home-data-card">
+                <h2>Mejores marcas</h2>
+                <?php if ( empty( $best_marks ) ) : ?>
+                    <p class="gymtrack-home-empty">Todavía no tienes marcas registradas.</p>
+                <?php else : ?>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Ejercicio</th>
+                                <th>Mejor peso</th>
+                                <th>Fecha</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ( $best_marks as $mark ) : ?>
+                                <tr>
+                                    <td><?php echo esc_html( $mark->exercise_name ); ?></td>
+                                    <td><?php echo esc_html( number_format_i18n( (float) $mark->weight, 2 ) ); ?> kg</td>
+                                    <td><?php echo esc_html( $mark->workout_date ); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
+            </div>
+
+            <div class="gymtrack-home-data-card">
+                <h2>Acciones rápidas</h2>
+                <div class="gymtrack-home-quick-actions">
+                    <a href="<?php echo esc_url( $gymtrack_register_url ); ?>">Registrar entrenamiento</a>
+                    <a href="<?php echo esc_url( $gymtrack_history_url ); ?>">Ver historial</a>
+                    <a href="<?php echo esc_url( $gymtrack_progress_url ); ?>">Ver progreso</a>
+                    <a href="<?php echo esc_url( $gymtrack_library_url ); ?>">Biblioteca de ejercicios</a>
+                </div>
+            </div>
+        </section>
     </div>
+
 
     <?php
     return ob_get_clean();
@@ -820,8 +1570,76 @@ function gymtrack_frontend_styles() {
     if ( $printed ) { return ''; }
     $printed = true;
     return '<style>
-        .gymtrack-frontend{max-width:1100px;margin:30px auto;padding:0 20px;font-family:inherit}.gymtrack-frontend h1{margin-bottom:8px}.gymtrack-frontend .gymtrack-card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin-bottom:20px;box-sizing:border-box}.gymtrack-frontend table{width:100%;border-collapse:collapse}.gymtrack-frontend th,.gymtrack-frontend td{padding:10px;border-bottom:1px solid #eee;text-align:left}.gymtrack-frontend input,.gymtrack-frontend select,.gymtrack-frontend textarea{max-width:100%;box-sizing:border-box;padding:8px}.gymtrack-frontend label{font-weight:600;display:block;margin-bottom:6px}.gymtrack-frontend .field{margin-bottom:16px}.gymtrack-frontend .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.gymtrack-frontend .button{display:inline-block;padding:10px 16px;border:0;border-radius:5px;background:#2271b1;color:#fff;text-decoration:none;cursor:pointer}.gymtrack-frontend .button.secondary{background:#666}.gymtrack-frontend .message{padding:12px 16px;border-radius:5px;margin-bottom:20px;background:#f0f6fc;border-left:4px solid #2271b1}.gymtrack-frontend .message.success{background:#edf7ed;border-left-color:#46b450}.gymtrack-frontend .message.error{background:#fbeaea;border-left-color:#dc3232}.gymtrack-frontend .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.gymtrack-frontend .muted{color:#666}.gymtrack-frontend .card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.gymtrack-frontend .exercise-card{border:1px solid #ddd;border-radius:8px;padding:18px}.gymtrack-frontend img{max-width:180px;height:auto;border-radius:6px}@media(max-width:700px){.gymtrack-frontend .grid,.gymtrack-frontend .card-grid{grid-template-columns:1fr}.gymtrack-frontend{padding:0 12px}.gymtrack-frontend table{font-size:14px}}
-    </style>';
+        html,body{overflow-x:hidden}
+        body.gymtrack-app-page{background:#050607 !important;color:#f4f5f6;overflow-x:hidden !important}
+        body.gymtrack-app-page header.wp-block-template-part,
+        body.gymtrack-app-page .wp-site-blocks > header,
+        body.gymtrack-app-page .entry-header,
+        body.gymtrack-app-page .wp-block-post-title,
+        body.gymtrack-app-page .entry-title,
+        body.gymtrack-app-page > footer,
+        body.gymtrack-app-page .wp-site-blocks > footer{display:none !important}
+        body.gymtrack-app-page .wp-site-blocks,
+        body.gymtrack-app-page .site-content,
+        body.gymtrack-app-page main,
+        body.gymtrack-app-page .entry-content,
+        body.gymtrack-app-page .wp-block-post-content{
+            width:100% !important;
+            max-width:none !important;
+            margin:0 !important;
+            padding:0 !important;
+        }
+        body.gymtrack-app-page main,
+        body.gymtrack-app-page .entry-content,
+        body.gymtrack-app-page .wp-block-post-content{
+            min-width:0 !important;
+        }
+        body.gymtrack-app-page .wp-site-blocks > main{
+            width:100vw !important;
+            max-width:none !important;
+            margin-left:calc(50% - 50vw) !important;
+            margin-right:calc(50% - 50vw) !important;
+        }
+        body.gymtrack-app-page .entry-content{
+            width:100vw !important;
+            max-width:none !important;
+            margin-left:calc(50% - 50vw) !important;
+            margin-right:calc(50% - 50vw) !important;
+        }
+        .gymtrack-frontend{max-width:1180px;margin:32px auto 70px;padding:0 20px;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#f4f5f6}.gymtrack-frontend h1{margin-bottom:8px}.gymtrack-frontend .gymtrack-card{background:linear-gradient(145deg,#181b1e,#0d0f11);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:24px;margin-bottom:20px;box-sizing:border-box;box-shadow:0 15px 45px rgba(0,0,0,.2)}.gymtrack-frontend table{width:100%;border-collapse:collapse}.gymtrack-frontend th,.gymtrack-frontend td{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.gymtrack-frontend th{color:#ff8614;font-size:11px;text-transform:uppercase;letter-spacing:.08em}.gymtrack-frontend input,.gymtrack-frontend select,.gymtrack-frontend textarea{max-width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #444;background:#111;color:#fff}.gymtrack-frontend label{font-weight:600;display:block;margin-bottom:6px}.gymtrack-frontend .field{margin-bottom:16px}.gymtrack-frontend .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.gymtrack-frontend .button{display:inline-block;padding:11px 17px;border:0;border-radius:7px;background:#ff8614;color:#080a0c;text-decoration:none;cursor:pointer;font-weight:800}.gymtrack-frontend .button.secondary{background:#444;color:#fff}.gymtrack-frontend .message{padding:12px 16px;border-radius:7px;margin-bottom:20px;background:#111c25;border-left:4px solid #ff8614}.gymtrack-frontend .message.success{background:#112017;border-left-color:#46b450}.gymtrack-frontend .message.error{background:#261416;border-left-color:#dc3232}.gymtrack-frontend .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.gymtrack-frontend .muted{color:#a7aaad}.gymtrack-frontend .card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.gymtrack-frontend .exercise-card{border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:18px;background:#111315}.gymtrack-frontend img{max-width:180px;height:auto;border-radius:6px}.gymtrack-fullscreen-page .gymtrack-visual-header-image{max-width:none !important;max-height:none !important;width:100% !important;height:100% !important;object-fit:cover !important;display:block !important}
+        .gymtrack-frontend.gymtrack-fullscreen-page{width:100vw !important;max-width:none !important;margin:0 !important;padding:0 !important;background:#050607;min-height:100vh;overflow:hidden}
+        .gymtrack-fullscreen-page .gymtrack-visual-header{position:relative;width:100%;height:100vh;min-height:620px;margin:0 0 45px;padding:0;border:0;border-radius:0;overflow:hidden;background:#050607;box-shadow:none;isolation:isolate}
+        body.admin-bar .gymtrack-fullscreen-page .gymtrack-visual-header{height:calc(100vh - 32px);min-height:588px}
+        .gymtrack-fullscreen-page .gymtrack-visual-header-image{position:absolute;inset:0;width:100%;height:100%;display:block !important;visibility:visible !important;opacity:1 !important;object-fit:cover;object-position:center center;background:#050607;z-index:0}
+        .gymtrack-fullscreen-page .gymtrack-visual-header-overlay{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.10) 0%,rgba(0,0,0,.08) 50%,rgba(0,0,0,.72) 100%),linear-gradient(90deg,rgba(3,5,7,.45) 0%,rgba(3,5,7,.08) 55%,rgba(3,5,7,.42) 100%);z-index:1;pointer-events:none}
+        .gymtrack-fullscreen-page .gymtrack-visual-header-content{position:absolute;left:clamp(22px,5vw,90px);right:clamp(22px,5vw,90px);bottom:clamp(34px,7vh,82px);z-index:3;padding:0;max-width:900px;text-shadow:0 3px 20px rgba(0,0,0,.75)}
+        .gymtrack-fullscreen-page .gymtrack-visual-header-kicker{margin:0 0 10px;color:#ff8614;font-size:13px;font-weight:900;letter-spacing:.24em;text-transform:uppercase}
+        .gymtrack-fullscreen-page .gymtrack-visual-header h1{margin:0;color:#fff;font-family:Impact,Haettenschweiler,"Arial Black",sans-serif;font-size:clamp(54px,8vw,118px);line-height:.86;text-transform:uppercase;letter-spacing:-.035em}
+        .gymtrack-fullscreen-page .gymtrack-visual-header-content>p:last-child{max-width:680px;margin:17px 0 0;color:rgba(255,255,255,.90);font-size:clamp(15px,1.4vw,21px);line-height:1.45}
+        .gymtrack-fullscreen-page .gymtrack-home-back{position:absolute;top:clamp(18px,3vh,32px);left:clamp(18px,3vw,45px);z-index:5;display:inline-flex;align-items:center;gap:9px;padding:12px 18px;border:1px solid rgba(255,255,255,.28);border-radius:999px;background:rgba(5,7,9,.72);backdrop-filter:blur(10px);color:#fff;text-decoration:none;font-weight:800;font-size:14px;letter-spacing:.04em;text-transform:uppercase;box-shadow:0 8px 25px rgba(0,0,0,.3);transition:.2s ease}
+        .gymtrack-fullscreen-page .gymtrack-home-back:hover{background:#ff8614;color:#080a0c;border-color:#ff8614;transform:translateY(-1px)}
+        .gymtrack-fullscreen-page .gymtrack-home-back span{font-size:22px;line-height:1}
+        .gymtrack-fullscreen-page > h1,.gymtrack-fullscreen-page > p,.gymtrack-fullscreen-page > .message,.gymtrack-fullscreen-page > .gymtrack-card,.gymtrack-fullscreen-page > .actions{max-width:1180px;margin-left:auto;margin-right:auto}
+        .gymtrack-fullscreen-page > h1{margin-top:0;padding-left:20px;padding-right:20px}
+        .gymtrack-fullscreen-page > p{padding-left:20px;padding-right:20px}
+        .gymtrack-fullscreen-page > .actions{padding-bottom:30px}
+        @media(max-width:700px){.gymtrack-frontend .grid,.gymtrack-frontend .card-grid{grid-template-columns:1fr}.gymtrack-frontend{padding:0 12px}.gymtrack-frontend table{font-size:14px}.gymtrack-fullscreen-page .gymtrack-visual-header{height:100svh;min-height:520px;margin-left:0;width:100%;margin-bottom:35px} body.admin-bar .gymtrack-fullscreen-page .gymtrack-visual-header{height:calc(100svh - 46px);min-height:480px}.gymtrack-fullscreen-page .gymtrack-visual-header-content{left:20px;right:20px;bottom:30px}.gymtrack-fullscreen-page .gymtrack-home-back{top:15px;left:15px;padding:10px 14px;font-size:12px}.gymtrack-fullscreen-page .gymtrack-visual-header h1{font-size:clamp(46px,15vw,78px)}.gymtrack-fullscreen-page .gymtrack-visual-header-content>p:last-child{font-size:14px}}
+    </style>';;
+}
+
+function gymtrack_frontend_asset_url( $relative_path ) {
+    $file_path = plugin_dir_path( __FILE__ ) . ltrim( $relative_path, '/\\' );
+    $url = plugins_url( ltrim( $relative_path, '/\\' ), __FILE__ );
+    if ( file_exists( $file_path ) ) {
+        $url = add_query_arg( 'v', (string) filemtime( $file_path ), $url );
+    }
+    return $url;
+}
+
+function gymtrack_frontend_visual_header( $title, $subtitle, $image_url, $kicker = 'GYMTRACK' ) {
+    $front_page_id = (int) get_option( 'page_on_front' );
+    $home_url = $front_page_id > 0 ? get_permalink( $front_page_id ) : home_url( '/' );
+    return '<div class="gymtrack-visual-header"><img class="gymtrack-visual-header-image" src="' . esc_url( $image_url ) . '" alt="' . esc_attr( $title ) . '"><div class="gymtrack-visual-header-overlay"></div><a class="gymtrack-home-back" href="' . esc_url( $home_url ) . '" aria-label="Volver a la pantalla de inicio"><span aria-hidden="true">‹</span> Inicio</a><div class="gymtrack-visual-header-content"><p class="gymtrack-visual-header-kicker">' . esc_html( $kicker ) . '</p><h1>' . esc_html( $title ) . '</h1><p>' . esc_html( $subtitle ) . '</p></div></div>';
 }
 
 function gymtrack_frontend_register_shortcode() {
@@ -842,8 +1660,14 @@ function gymtrack_frontend_register_shortcode() {
         $routine_id = absint(isset($_POST['routine_id']) ? $_POST['routine_id'] : 0);
         $rows = array();
 
+        $date_object = DateTime::createFromFormat( 'Y-m-d', $date );
+        $date_valid = $date_object && $date_object->format( 'Y-m-d' ) === $date;
+
         if ( '' === $date ) {
             $message = 'La fecha es obligatoria.';
+            $message_class = 'message error';
+        } elseif ( ! $date_valid ) {
+            $message = 'La fecha no tiene un formato válido. Usa AAAA-MM-DD.';
             $message_class = 'message error';
         } elseif ( $routine_id > 0 && isset($_POST['routine_exercises']) && is_array($_POST['routine_exercises']) ) {
             $routine_exists = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table_routines WHERE id=%d LIMIT 1", $routine_id));
@@ -857,8 +1681,15 @@ function gymtrack_frontend_register_shortcode() {
                     $sets = absint(isset($row['sets']) ? $row['sets'] : 0);
                     $reps = absint(isset($row['repetitions']) ? $row['repetitions'] : 0);
                     $row_notes = sanitize_textarea_field(isset($row['notes']) ? wp_unslash($row['notes']) : '');
+                    $belongs_to_routine = $wpdb->get_var(
+                        $wpdb->prepare(
+                            "SELECT id FROM $table_routine_exercises WHERE routine_id=%d AND exercise_id=%d LIMIT 1",
+                            $routine_id,
+                            $exercise_id
+                        )
+                    );
                     $exists = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table_exercises WHERE id=%d LIMIT 1", $exercise_id));
-                    if ( $exists && $weight > 0 && $sets > 0 && $reps > 0 ) {
+                    if ( $exists && $belongs_to_routine && $weight > 0 && $sets > 0 && $reps > 0 ) {
                         $rows[] = array('exercise_id'=>$exercise_id,'weight'=>$weight,'sets'=>$sets,'repetitions'=>$reps,'notes'=>$row_notes);
                     }
                 }
@@ -903,7 +1734,8 @@ function gymtrack_frontend_register_shortcode() {
     }
     ob_start(); echo gymtrack_frontend_styles();
     ?>
-    <div class="gymtrack-frontend">
+    <div class="gymtrack-frontend gymtrack-fullscreen-page">
+        <?php echo gymtrack_frontend_visual_header( 'Registra', 'Guarda tus entrenamientos y mantén el control de cada sesión.', gymtrack_frontend_asset_url( 'assets/gymtrack-registra.jpg' ) ); ?>
         <h1>Registrar entrenamiento</h1>
         <p class="muted">Registra tu entrenamiento manualmente o utiliza una rutina guardada.</p>
         <?php if ( $message ) : ?><div class="<?php echo esc_attr($message_class); ?>"><p><?php echo esc_html($message); ?></p></div><?php endif; ?>
@@ -944,7 +1776,7 @@ function gymtrack_frontend_history_shortcode() {
     $access=gymtrack_frontend_access_check(); if(''!==$access){return $access;} global $wpdb;
     $tw=$wpdb->prefix.'gymtrack_workouts';$ts=$wpdb->prefix.'gymtrack_sets';$te=$wpdb->prefix.'gymtrack_exercises';
     $rows=$wpdb->get_results($wpdb->prepare("SELECT w.workout_date,e.name exercise_name,e.muscle_group,s.weight,s.sets,s.repetitions,s.notes FROM $tw w INNER JOIN $ts s ON w.id=s.workout_id INNER JOIN $te e ON s.exercise_id=e.id WHERE w.user_id=%d AND s.weight>0 ORDER BY w.workout_date DESC,w.id DESC,s.id ASC",get_current_user_id()));
-    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend"><h1>Mi historial</h1><p class="muted">Tus entrenamientos registrados en GymTrack.</p><div class="gymtrack-card"><?php if(empty($rows)):?><p>No hay entrenamientos válidos registrados todavía.</p><?php else:?><div style="overflow-x:auto"><table><thead><tr><th>Fecha</th><th>Ejercicio</th><th>Grupo muscular</th><th>Peso</th><th>Series</th><th>Repeticiones</th><th>Notas</th></tr></thead><tbody><?php foreach($rows as $r):?><tr><td><?php echo esc_html($r->workout_date);?></td><td><strong><?php echo esc_html($r->exercise_name);?></strong></td><td><?php echo esc_html($r->muscle_group);?></td><td><?php echo esc_html(number_format_i18n((float)$r->weight,2));?> kg</td><td><?php echo esc_html($r->sets);?></td><td><?php echo esc_html($r->repetitions);?></td><td><?php echo esc_html($r->notes);?></td></tr><?php endforeach;?></tbody></table></div><?php endif;?></div><div class="actions"><a class="button" href="<?php echo esc_url(gymtrack_frontend_page_url('gymtrack-registrar'));?>">Registrar entrenamiento</a><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div><?php return ob_get_clean();
+    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend gymtrack-fullscreen-page"><?php echo gymtrack_frontend_visual_header( 'Analiza', 'Revisa tus entrenamientos y sigue tu evolución sesión a sesión.', gymtrack_frontend_asset_url( 'assets/gymtrack-analiza.jpg' ) ); ?><h1>Mi historial</h1><p class="muted">Tus entrenamientos registrados en GymTrack.</p><div class="gymtrack-card"><?php if(empty($rows)):?><p>No hay entrenamientos válidos registrados todavía.</p><?php else:?><div style="overflow-x:auto"><table><thead><tr><th>Fecha</th><th>Ejercicio</th><th>Grupo muscular</th><th>Peso</th><th>Series</th><th>Repeticiones</th><th>Notas</th></tr></thead><tbody><?php foreach($rows as $r):?><tr><td><?php echo esc_html($r->workout_date);?></td><td><strong><?php echo esc_html($r->exercise_name);?></strong></td><td><?php echo esc_html($r->muscle_group);?></td><td><?php echo esc_html(number_format_i18n((float)$r->weight,2));?> kg</td><td><?php echo esc_html($r->sets);?></td><td><?php echo esc_html($r->repetitions);?></td><td><?php echo esc_html($r->notes);?></td></tr><?php endforeach;?></tbody></table></div><?php endif;?></div><div class="actions"><a class="button" href="<?php echo esc_url(gymtrack_frontend_page_url('gymtrack-registrar'));?>">Registrar entrenamiento</a><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div><?php return ob_get_clean();
 }
 add_shortcode('gymtrack_history','gymtrack_frontend_history_shortcode');
 
@@ -953,7 +1785,7 @@ function gymtrack_frontend_progress_shortcode() {
     $tw=$wpdb->prefix.'gymtrack_workouts';$ts=$wpdb->prefix.'gymtrack_sets';$te=$wpdb->prefix.'gymtrack_exercises';
     $rows=$wpdb->get_results($wpdb->prepare("SELECT e.id exercise_id,e.name exercise_name,w.workout_date,s.weight,s.sets,s.repetitions FROM $tw w INNER JOIN $ts s ON w.id=s.workout_id INNER JOIN $te e ON s.exercise_id=e.id WHERE w.user_id=%d AND s.weight>0 ORDER BY e.name ASC,w.workout_date ASC,w.id ASC",get_current_user_id()));
     $best=array();$chart=array();foreach($rows as $r){$chart[$r->exercise_id]['name']=$r->exercise_name;$chart[$r->exercise_id]['labels'][]=$r->workout_date;$chart[$r->exercise_id]['data'][]=(float)$r->weight;if(!isset($best[$r->exercise_id])||(float)$r->weight>(float)$best[$r->exercise_id]->weight){$best[$r->exercise_id]=$r;}}
-    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend"><h1>Mi progreso</h1><p class="muted">Evolución de tus pesos y mejores marcas.</p><div class="gymtrack-card"><h2>Mejores marcas</h2><?php if(empty($best)):?><p>No hay datos de progreso todavía.</p><?php else:?><table><thead><tr><th>Ejercicio</th><th>Mejor peso</th><th>Fecha</th></tr></thead><tbody><?php foreach($best as $r):?><tr><td><?php echo esc_html($r->exercise_name);?></td><td><?php echo esc_html(number_format_i18n((float)$r->weight,2));?> kg</td><td><?php echo esc_html($r->workout_date);?></td></tr><?php endforeach;?></tbody></table><?php endif;?></div><div class="gymtrack-card"><h2>Evolución</h2><?php if(empty($chart)):?><p>No hay datos para mostrar.</p><?php else:?><div class="field"><label for="gt-progress-exercise">Ejercicio</label><select id="gt-progress-exercise"><?php foreach($chart as $id=>$data):?><option value="<?php echo esc_attr($id);?>"><?php echo esc_html($data['name']);?></option><?php endforeach;?></select></div><canvas id="gt-progress-chart" height="120"></canvas><?php endif;?></div><div class="actions"><a class="button" href="<?php echo esc_url(gymtrack_frontend_page_url('gymtrack-registrar'));?>">Registrar entrenamiento</a><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div>
+    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend gymtrack-fullscreen-page"><?php echo gymtrack_frontend_visual_header( 'Supérate', 'Alcanza tus objetivos y convierte tus mejores marcas en nuevos retos.', gymtrack_frontend_asset_url( 'assets/gymtrack-superate.jpg' ) ); ?><h1>Mi progreso</h1><p class="muted">Evolución de tus pesos y mejores marcas.</p><div class="gymtrack-card"><h2>Mejores marcas</h2><?php if(empty($best)):?><p>No hay datos de progreso todavía.</p><?php else:?><table><thead><tr><th>Ejercicio</th><th>Mejor peso</th><th>Fecha</th></tr></thead><tbody><?php foreach($best as $r):?><tr><td><?php echo esc_html($r->exercise_name);?></td><td><?php echo esc_html(number_format_i18n((float)$r->weight,2));?> kg</td><td><?php echo esc_html($r->workout_date);?></td></tr><?php endforeach;?></tbody></table><?php endif;?></div><div class="gymtrack-card"><h2>Evolución</h2><?php if(empty($chart)):?><p>No hay datos para mostrar.</p><?php else:?><div class="field"><label for="gt-progress-exercise">Ejercicio</label><select id="gt-progress-exercise"><?php foreach($chart as $id=>$data):?><option value="<?php echo esc_attr($id);?>"><?php echo esc_html($data['name']);?></option><?php endforeach;?></select></div><canvas id="gt-progress-chart" height="120"></canvas><?php endif;?></div><div class="actions"><a class="button" href="<?php echo esc_url(gymtrack_frontend_page_url('gymtrack-registrar'));?>">Registrar entrenamiento</a><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div>
     <?php if(!empty($chart)):?><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const data=<?php echo wp_json_encode($chart);?>;const sel=document.getElementById('gt-progress-exercise'),ctx=document.getElementById('gt-progress-chart').getContext('2d');let chart;function draw(){const d=data[sel.value];if(chart){chart.destroy();}chart=new Chart(ctx,{type:'line',data:{labels:d.labels,datasets:[{label:d.name+' (kg)',data:d.data,tension:.2}]},options:{responsive:true,scales:{y:{beginAtZero:false}}}});}sel.addEventListener('change',draw);draw();});</script><?php endif;?><?php return ob_get_clean();
 }
 add_shortcode('gymtrack_progress','gymtrack_frontend_progress_shortcode');
@@ -962,7 +1794,7 @@ function gymtrack_frontend_library_shortcode() {
     $access=gymtrack_frontend_access_check(); if(''!==$access){return $access;}
     $search=sanitize_text_field(isset($_GET['gymtrack_search'])?wp_unslash($_GET['gymtrack_search']):'');$results=array();$error='';
     if(''!==$search){$cache_key='gymtrack_wger_'.md5(strtolower($search));$cached=get_transient($cache_key);if(false!==$cached){$results=$cached;}else{$response=wp_remote_get(add_query_arg(array('name__search'=>$search,'limit'=>12),'https://wger.de/api/v2/exerciseinfo/'),array('timeout'=>10,'headers'=>array('Accept'=>'application/json')));if(is_wp_error($response)){$error=$response->get_error_message();}else{$code=wp_remote_retrieve_response_code($response);$body=json_decode(wp_remote_retrieve_body($response),true);if(200!==$code||!is_array($body)){$error='No se ha podido consultar la biblioteca externa.';}else{$results=isset($body['results'])&&is_array($body['results'])?$body['results']:array();set_transient($cache_key,$results,10*MINUTE_IN_SECONDS);}}}}
-    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend"><h1>Biblioteca de ejercicios</h1><p class="muted">Consulta ejercicios de la biblioteca pública de wger.</p><div class="gymtrack-card"><form method="get" action="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-biblioteca' ) ); ?>"><div class="field"><label for="gt-search">Buscar ejercicio</label><input id="gt-search" type="search" name="gymtrack_search" value="<?php echo esc_attr($search);?>" placeholder="Ej.: press banca"><button class="button" type="submit">Buscar</button></div></form></div><?php if($error):?><div class="message error"><p><?php echo esc_html($error);?></p></div><?php endif;?><?php if(''!==$search&&!$error):?><div class="card-grid"><?php foreach($results as $item){$name='';$description='';$category='';$translations=isset($item['translations'])&&is_array($item['translations'])?$item['translations']:array();foreach($translations as $tr){if(isset($tr['language'])&&is_array($tr['language'])&&isset($tr['language']['short_name'])&&'es'===$tr['language']['short_name']){$name=$tr['name']??'';$description=wp_strip_all_tags($tr['description']??'');break;}}if(''===$name&&isset($item['name']))$name=$item['name'];if(''===$description&&isset($item['description']))$description=wp_strip_all_tags($item['description']);if(isset($item['category'])&&is_array($item['category']))$category=$item['category']['name']??'';?><div class="exercise-card"><h2><?php echo esc_html($name?:'Ejercicio');?></h2><?php if($category):?><p><strong>Categoría:</strong> <?php echo esc_html($category);?></p><?php endif;?><?php if($description):?><p><?php echo esc_html(wp_trim_words($description,45));?></p><?php endif;?><?php if(isset($item['id'])):?><p class="muted">ID externo: <?php echo esc_html($item['id']);?></p><?php endif;?></div><?php }?></div><?php elseif(''===$search):?><div class="gymtrack-card"><p>Introduce un término para buscar ejercicios.</p></div><?php endif;?><div class="actions"><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div><?php return ob_get_clean();
+    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend gymtrack-fullscreen-page"><?php echo gymtrack_frontend_visual_header( 'Buscar ejercicios', 'Explora la biblioteca y encuentra el ejercicio que necesitas.', gymtrack_frontend_asset_url( 'assets/gymtrack-buscar.jpg' ) ); ?><h1>Biblioteca de ejercicios</h1><p class="muted">Consulta ejercicios de la biblioteca pública de wger.</p><div class="gymtrack-card"><form method="get" action="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-biblioteca' ) ); ?>"><div class="field"><label for="gt-search">Buscar ejercicio</label><input id="gt-search" type="search" name="gymtrack_search" value="<?php echo esc_attr($search);?>" placeholder="Ej.: press banca"><button class="button" type="submit">Buscar</button></div></form></div><?php if($error):?><div class="message error"><p><?php echo esc_html($error);?></p></div><?php endif;?><?php if(''!==$search&&!$error):?><div class="card-grid"><?php foreach($results as $item){$name='';$description='';$category='';$translations=isset($item['translations'])&&is_array($item['translations'])?$item['translations']:array();foreach($translations as $tr){if(isset($tr['language'])&&is_array($tr['language'])&&isset($tr['language']['short_name'])&&'es'===$tr['language']['short_name']){$name=$tr['name']??'';$description=wp_strip_all_tags($tr['description']??'');break;}}if(''===$name&&isset($item['name']))$name=$item['name'];if(''===$description&&isset($item['description']))$description=wp_strip_all_tags($item['description']);if(isset($item['category'])&&is_array($item['category']))$category=$item['category']['name']??'';?><div class="exercise-card"><h2><?php echo esc_html($name?:'Ejercicio');?></h2><?php if($category):?><p><strong>Categoría:</strong> <?php echo esc_html($category);?></p><?php endif;?><?php if($description):?><p><?php echo esc_html(wp_trim_words($description,45));?></p><?php endif;?><?php if(isset($item['id'])):?><p class="muted">ID externo: <?php echo esc_html($item['id']);?></p><?php endif;?></div><?php }?></div><?php elseif(''===$search):?><div class="gymtrack-card"><p>Introduce un término para buscar ejercicios.</p></div><?php endif;?><div class="actions"><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div><?php return ob_get_clean();
 }
 add_shortcode('gymtrack_library','gymtrack_frontend_library_shortcode');
 
@@ -975,7 +1807,7 @@ function gymtrack_ensure_frontend_pages() {
     );
     foreach($pages as $slug=>$data){$page=get_page_by_path($slug);if($page instanceof WP_Post){if(!has_shortcode($page->post_content,trim($data[1],'[]'))){wp_update_post(array('ID'=>$page->ID,'post_content'=>$data[1]));}}else{$id=wp_insert_post(array('post_title'=>$data[0],'post_name'=>$slug,'post_content'=>$data[1],'post_status'=>'publish','post_type'=>'page'),true);}}
 }
-add_action('init','gymtrack_ensure_frontend_pages',20);
+add_action( 'admin_init', 'gymtrack_ensure_frontend_pages', 20 );
 
 
 function gymtrack_ensure_frontend_dashboard_page() {
@@ -1030,7 +1862,7 @@ function gymtrack_ensure_frontend_dashboard_page() {
     }
 }
 
-add_action( 'init', 'gymtrack_ensure_frontend_dashboard_page', 20 );
+add_action( 'admin_init', 'gymtrack_ensure_frontend_dashboard_page', 20 );
 
 
 /**
@@ -1062,14 +1894,27 @@ function gymtrack_configure_site_as_app() {
     }
 
     // Eliminar de la vista publica el contenido de demostracion de WordPress.
-    $hello_world = get_page_by_title( '¡Hola, mundo!' );
-    if ( $hello_world instanceof WP_Post && 'post' === $hello_world->post_type ) {
-        wp_trash_post( $hello_world->ID );
-    }
+    // Se evita get_page_by_title(), que esta obsoleto en versiones modernas
+    // de WordPress, y se consulta directamente por titulo y tipo de contenido.
+    $demo_titles = array( '¡Hola, mundo!', 'Hello world!' );
 
-    $hello_world_en = get_page_by_title( 'Hello world!' );
-    if ( $hello_world_en instanceof WP_Post && 'post' === $hello_world_en->post_type ) {
-        wp_trash_post( $hello_world_en->ID );
+    foreach ( $demo_titles as $demo_title ) {
+        $demo_posts = get_posts(
+            array(
+                'post_type'              => 'post',
+                'post_status'            => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+                'title'                  => $demo_title,
+                'posts_per_page'         => 1,
+                'suppress_filters'       => true,
+                'no_found_rows'          => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+            )
+        );
+
+        if ( ! empty( $demo_posts ) && $demo_posts[0] instanceof WP_Post ) {
+            wp_trash_post( $demo_posts[0]->ID );
+        }
     }
 
     $sample_page = get_page_by_path( 'pagina-de-ejemplo' );
@@ -1081,7 +1926,7 @@ function gymtrack_configure_site_as_app() {
         wp_trash_post( $sample_page->ID );
     }
 }
-add_action( 'init', 'gymtrack_configure_site_as_app', 30 );
+add_action( 'admin_init', 'gymtrack_configure_site_as_app', 30 );
 
 /**
  * =========================================================
@@ -1115,6 +1960,15 @@ function gymtrack_mark_public_app_body( $classes ) {
     return $classes;
 }
 add_filter( 'body_class', 'gymtrack_mark_public_app_body' );
+
+function gymtrack_mark_home_body_class( $classes ) {
+    if ( is_page( 'gymtrack' ) ) {
+        $classes[] = 'gymtrack-home-page';
+    }
+
+    return $classes;
+}
+add_filter( 'body_class', 'gymtrack_mark_home_body_class' );
 
 
 
@@ -1799,94 +2653,172 @@ function gymtrack_exercises_page() {
     global $wpdb;
 
     $table_exercises = $wpdb->prefix . 'gymtrack_exercises';
+    $table_sets = $wpdb->prefix . 'gymtrack_sets';
+    $table_routine_exercises = $wpdb->prefix . 'gymtrack_routine_exercises';
 
     if ( ! gymtrack_can_manage() ) {
         return;
     }
 
-
     /*
-     * Eliminar ejercicio
+     * Reparar textos antiguos que quedaron almacenados con caracteres
+     * españoles corruptos. Solo se corrigen coincidencias exactas conocidas.
      */
+    $exercise_text_repairs = array(
+        array( 'Curl con barra para trabajar los bíceps.', 'Curl con barra para trabajar los b??ceps.' ),
+        array( 'Sentadilla para trabajar principalmente cuádriceps y glúteos.', 'Sentadilla para trabajar principalmente cu??driceps y gl??teos.' ),
+    );
 
-    if (
-        isset( $_GET['action'] ) &&
-        $_GET['action'] === 'delete' &&
-        isset( $_GET['exercise_id'] )
-    ) {
-
-        $exercise_id = absint( $_GET['exercise_id'] );
-
-        check_admin_referer(
-            'gymtrack_delete_exercise_' . $exercise_id
-        );
-
-        $wpdb->delete(
-            $table_exercises,
-            array(
-                'id' => $exercise_id,
-            ),
-            array(
-                '%d',
+    foreach ( $exercise_text_repairs as $repair ) {
+        $wpdb->query(
+            $wpdb->prepare(
+                "UPDATE $table_exercises SET description = %s WHERE description = %s",
+                $repair[0],
+                $repair[1]
             )
         );
-
-        echo '<div class="notice notice-success is-dismissible">';
-        echo '<p>Ejercicio eliminado correctamente.</p>';
-        echo '</div>';
     }
 
-
     /*
-     * Añadir ejercicio
+     * Editar ejercicio.
      */
+    if ( isset( $_POST['gymtrack_edit_exercise'] ) ) {
 
-    if (
-        isset( $_POST['gymtrack_add_exercise'] ) &&
-        check_admin_referer( 'gymtrack_add_exercise' )
-    ) {
+        $exercise_id = absint( isset( $_POST['exercise_id'] ) ? $_POST['exercise_id'] : 0 );
 
-        $name = sanitize_text_field( $_POST['name'] );
-        $muscle_group = sanitize_text_field( $_POST['muscle_group'] );
-        $description = sanitize_textarea_field( $_POST['description'] );
+        check_admin_referer( 'gymtrack_edit_exercise_' . $exercise_id );
 
-        if ( ! empty( $name ) && ! empty( $muscle_group ) ) {
+        $name = sanitize_text_field(
+            isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : ''
+        );
+        $muscle_group = sanitize_text_field(
+            isset( $_POST['muscle_group'] ) ? wp_unslash( $_POST['muscle_group'] ) : ''
+        );
+        $description = sanitize_textarea_field(
+            isset( $_POST['description'] ) ? wp_unslash( $_POST['description'] ) : ''
+        );
 
-            $wpdb->insert(
+        if ( $exercise_id > 0 && '' !== $name && '' !== $muscle_group ) {
+            $updated = $wpdb->update(
                 $table_exercises,
                 array(
                     'name'         => $name,
                     'muscle_group' => $muscle_group,
                     'description'  => $description,
                 ),
-                array(
-                    '%s',
-                    '%s',
-                    '%s',
-                )
+                array( 'id' => $exercise_id ),
+                array( '%s', '%s', '%s' ),
+                array( '%d' )
             );
 
-            echo '<div class="notice notice-success is-dismissible">';
-            echo '<p>Ejercicio añadido correctamente.</p>';
-            echo '</div>';
+            if ( false !== $updated ) {
+                wp_safe_redirect( admin_url( 'admin.php?page=gymtrack' ) );
+                exit;
+            }
+        }
 
+        echo '<div class="notice notice-error is-dismissible"><p>El nombre y el grupo muscular son obligatorios.</p></div>';
+    }
+
+    /*
+     * Eliminar ejercicio.
+     * No permitimos borrar ejercicios que ya estén utilizados en rutinas
+     * o entrenamientos, para evitar registros huérfanos.
+     */
+    if (
+        isset( $_GET['action'] ) &&
+        'delete' === $_GET['action'] &&
+        isset( $_GET['exercise_id'] )
+    ) {
+
+        $exercise_id = absint( $_GET['exercise_id'] );
+
+        check_admin_referer( 'gymtrack_delete_exercise_' . $exercise_id );
+
+        $used_in_routines = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table_routine_exercises WHERE exercise_id = %d",
+                $exercise_id
+            )
+        );
+
+        $used_in_workouts = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*) FROM $table_sets WHERE exercise_id = %d",
+                $exercise_id
+            )
+        );
+
+        if ( $used_in_routines > 0 || $used_in_workouts > 0 ) {
+            echo '<div class="notice notice-error is-dismissible"><p>No se puede eliminar este ejercicio porque está siendo utilizado en rutinas o entrenamientos registrados.</p></div>';
         } else {
+            $deleted = $wpdb->delete(
+                $table_exercises,
+                array( 'id' => $exercise_id ),
+                array( '%d' )
+            );
 
-            echo '<div class="notice notice-error is-dismissible">';
-            echo '<p>El nombre y el grupo muscular son obligatorios.</p>';
-            echo '</div>';
+            if ( false !== $deleted ) {
+                echo '<div class="notice notice-success is-dismissible"><p>Ejercicio eliminado correctamente.</p></div>';
+            } else {
+                echo '<div class="notice notice-error is-dismissible"><p>No se ha podido eliminar el ejercicio.</p></div>';
+            }
         }
     }
 
-
     /*
-     * Obtener ejercicios
+     * Añadir ejercicio.
      */
+    if (
+        isset( $_POST['gymtrack_add_exercise'] ) &&
+        check_admin_referer( 'gymtrack_add_exercise' )
+    ) {
+
+        $name = sanitize_text_field(
+            isset( $_POST['name'] ) ? wp_unslash( $_POST['name'] ) : ''
+        );
+        $muscle_group = sanitize_text_field(
+            isset( $_POST['muscle_group'] ) ? wp_unslash( $_POST['muscle_group'] ) : ''
+        );
+        $description = sanitize_textarea_field(
+            isset( $_POST['description'] ) ? wp_unslash( $_POST['description'] ) : ''
+        );
+
+        if ( '' !== $name && '' !== $muscle_group ) {
+            $duplicate = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT id FROM $table_exercises WHERE name = %s LIMIT 1",
+                    $name
+                )
+            );
+
+            if ( $duplicate ) {
+                echo '<div class="notice notice-error is-dismissible"><p>Ya existe un ejercicio con ese nombre.</p></div>';
+            } else {
+                $inserted = $wpdb->insert(
+                    $table_exercises,
+                    array(
+                        'name'         => $name,
+                        'muscle_group' => $muscle_group,
+                        'description'  => $description,
+                    ),
+                    array( '%s', '%s', '%s' )
+                );
+
+                if ( false !== $inserted ) {
+                    wp_safe_redirect( admin_url( 'admin.php?page=gymtrack' ) );
+                    exit;
+                }
+
+                echo '<div class="notice notice-error is-dismissible"><p>No se ha podido guardar el ejercicio.</p></div>';
+            }
+        } else {
+            echo '<div class="notice notice-error is-dismissible"><p>El nombre y el grupo muscular son obligatorios.</p></div>';
+        }
+    }
 
     $exercises = $wpdb->get_results(
-        "SELECT *
-        FROM $table_exercises
-        ORDER BY name ASC"
+        "SELECT * FROM $table_exercises ORDER BY name ASC"
     );
     ?>
 
@@ -1897,76 +2829,26 @@ function gymtrack_exercises_page() {
         <h2>Añadir ejercicio</h2>
 
         <form method="post">
-
             <?php wp_nonce_field( 'gymtrack_add_exercise' ); ?>
 
             <table class="form-table">
-
                 <tr>
-                    <th>
-                        <label for="name">Nombre</label>
-                    </th>
-
-                    <td>
-                        <input
-                            type="text"
-                            name="name"
-                            id="name"
-                            class="regular-text"
-                            required
-                        >
-                    </td>
+                    <th><label for="gymtrack-exercise-name">Nombre</label></th>
+                    <td><input type="text" name="name" id="gymtrack-exercise-name" class="regular-text" required></td>
                 </tr>
-
                 <tr>
-                    <th>
-                        <label for="muscle_group">
-                            Grupo muscular
-                        </label>
-                    </th>
-
-                    <td>
-                        <input
-                            type="text"
-                            name="muscle_group"
-                            id="muscle_group"
-                            class="regular-text"
-                            required
-                        >
-                    </td>
+                    <th><label for="gymtrack-exercise-muscle">Grupo muscular</label></th>
+                    <td><input type="text" name="muscle_group" id="gymtrack-exercise-muscle" class="regular-text" required></td>
                 </tr>
-
                 <tr>
-                    <th>
-                        <label for="description">
-                            Descripción
-                        </label>
-                    </th>
-
-                    <td>
-                        <textarea
-                            name="description"
-                            id="description"
-                            rows="4"
-                            class="large-text"
-                        ></textarea>
-                    </td>
+                    <th><label for="gymtrack-exercise-description">Descripción</label></th>
+                    <td><textarea name="description" id="gymtrack-exercise-description" rows="4" class="large-text"></textarea></td>
                 </tr>
-
             </table>
 
             <p>
-
-                <button
-                    type="submit"
-                    name="gymtrack_add_exercise"
-                    class="button button-primary"
-                >
-                    Añadir ejercicio
-                </button>
-
+                <button type="submit" name="gymtrack_add_exercise" class="button button-primary">Añadir ejercicio</button>
             </p>
-
         </form>
 
         <hr>
@@ -1974,15 +2856,10 @@ function gymtrack_exercises_page() {
         <h2>Ejercicios registrados</h2>
 
         <?php if ( empty( $exercises ) ) : ?>
-
             <p>No hay ejercicios registrados todavía.</p>
-
         <?php else : ?>
-
             <table class="widefat striped">
-
                 <thead>
-
                     <tr>
                         <th>ID</th>
                         <th>Nombre</th>
@@ -1990,67 +2867,94 @@ function gymtrack_exercises_page() {
                         <th>Descripción</th>
                         <th>Acciones</th>
                     </tr>
-
                 </thead>
-
                 <tbody>
-
                     <?php foreach ( $exercises as $exercise ) : ?>
-
                         <tr>
-
+                            <td><?php echo esc_html( $exercise->id ); ?></td>
+                            <td><strong><?php echo esc_html( $exercise->name ); ?></strong></td>
+                            <td><?php echo esc_html( $exercise->muscle_group ); ?></td>
+                            <td><?php echo esc_html( $exercise->description ); ?></td>
                             <td>
-                                <?php echo esc_html( $exercise->id ); ?>
-                            </td>
-
-                            <td>
-                                <strong>
-                                    <?php echo esc_html( $exercise->name ); ?>
-                                </strong>
-                            </td>
-
-                            <td>
-                                <?php echo esc_html( $exercise->muscle_group ); ?>
-                            </td>
-
-                            <td>
-                                <?php echo esc_html( $exercise->description ); ?>
-                            </td>
-
-                            <td>
+                                <button
+                                    type="button"
+                                    class="button gymtrack-toggle-exercise-edit"
+                                    aria-expanded="false"
+                                    aria-controls="gymtrack-exercise-edit-<?php echo esc_attr( $exercise->id ); ?>"
+                                >
+                                    Editar
+                                </button>
 
                                 <?php
-
                                 $delete_url = wp_nonce_url(
                                     admin_url(
                                         'admin.php?page=gymtrack&action=delete&exercise_id=' . $exercise->id
                                     ),
                                     'gymtrack_delete_exercise_' . $exercise->id
                                 );
-
                                 ?>
 
                                 <a
                                     href="<?php echo esc_url( $delete_url ); ?>"
                                     class="button"
-                                    onclick="return confirm('¿Seguro que quieres eliminar este ejercicio?');"
+                                    onclick="return confirm('¿Seguro que quieres eliminar este ejercicio? Si está siendo utilizado, GymTrack impedirá el borrado.');"
                                 >
                                     Eliminar
                                 </a>
 
+                                <div
+                                    id="gymtrack-exercise-edit-<?php echo esc_attr( $exercise->id ); ?>"
+                                    hidden
+                                    style="margin-top:12px;padding:12px;border-left:3px solid #2271b1;background:#f6f7f7;max-width:700px;"
+                                >
+                                    <form method="post">
+                                        <?php wp_nonce_field( 'gymtrack_edit_exercise_' . $exercise->id ); ?>
+                                        <input type="hidden" name="exercise_id" value="<?php echo esc_attr( $exercise->id ); ?>">
+
+                                        <p>
+                                            <label for="gymtrack-edit-name-<?php echo esc_attr( $exercise->id ); ?>"><strong>Nombre</strong></label><br>
+                                            <input type="text" name="name" id="gymtrack-edit-name-<?php echo esc_attr( $exercise->id ); ?>" class="regular-text" value="<?php echo esc_attr( $exercise->name ); ?>" required>
+                                        </p>
+
+                                        <p>
+                                            <label for="gymtrack-edit-muscle-<?php echo esc_attr( $exercise->id ); ?>"><strong>Grupo muscular</strong></label><br>
+                                            <input type="text" name="muscle_group" id="gymtrack-edit-muscle-<?php echo esc_attr( $exercise->id ); ?>" class="regular-text" value="<?php echo esc_attr( $exercise->muscle_group ); ?>" required>
+                                        </p>
+
+                                        <p>
+                                            <label for="gymtrack-edit-description-<?php echo esc_attr( $exercise->id ); ?>"><strong>Descripción</strong></label><br>
+                                            <textarea name="description" id="gymtrack-edit-description-<?php echo esc_attr( $exercise->id ); ?>" rows="3" class="large-text"><?php echo esc_textarea( $exercise->description ); ?></textarea>
+                                        </p>
+
+                                        <p>
+                                            <button type="submit" name="gymtrack_edit_exercise" class="button button-primary">Guardar cambios</button>
+                                        </p>
+                                    </form>
+                                </div>
                             </td>
-
                         </tr>
-
                     <?php endforeach; ?>
-
                 </tbody>
-
             </table>
-
         <?php endif; ?>
 
     </div>
+
+    <script>
+    (function () {
+        document.querySelectorAll('.gymtrack-toggle-exercise-edit').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var panelId = button.getAttribute('aria-controls');
+                var panel = document.getElementById(panelId);
+                if (!panel) return;
+                var willOpen = panel.hidden;
+                panel.hidden = !willOpen;
+                button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+                button.textContent = willOpen ? 'Ocultar edición' : 'Editar';
+            });
+        });
+    }());
+    </script>
 
     <?php
 }
@@ -2062,15 +2966,73 @@ function gymtrack_exercises_page() {
  * =========================================================
  */
 
+function gymtrack_routine_display_text( $text ) {
+
+    return str_replace(
+        array(
+            'b??ceps',
+            'B??ceps',
+            't??cnica',
+            'T??cnica',
+            'tecnica',
+            'Tecnica',
+            'Mantener buena tecnica',
+            'Mantener buena Tecnica',
+        ),
+        array(
+            'bíceps',
+            'Bíceps',
+            'técnica',
+            'Técnica',
+            'técnica',
+            'Técnica',
+            'Mantener buena técnica',
+            'Mantener buena Técnica',
+        ),
+        (string) $text
+    );
+}
+
 function gymtrack_routines_page() {
 
     global $wpdb;
 
     $table_routines = $wpdb->prefix . 'gymtrack_routines';
+    $table_exercises = $wpdb->prefix . 'gymtrack_exercises';
+    $table_routine_exercises = $wpdb->prefix . 'gymtrack_routine_exercises';
 
     if ( ! gymtrack_can_manage() ) {
         return;
     }
+
+    /*
+     * Reparación exacta de textos antiguos que pudieron quedar guardados
+     * con caracteres españoles corruptos. Solo se modifican coincidencias
+     * exactas y conocidas; no se altera ningún otro dato.
+     */
+    $wpdb->query( $wpdb->prepare(
+        "UPDATE $table_exercises SET name = %s WHERE name = %s",
+        'Curl de bíceps',
+        'Curl de b??ceps'
+    ) );
+
+    $wpdb->query( $wpdb->prepare(
+        "UPDATE $table_exercises SET muscle_group = %s WHERE muscle_group = %s",
+        'Bíceps',
+        'B??ceps'
+    ) );
+
+    $wpdb->query( $wpdb->prepare(
+        "UPDATE $table_routine_exercises SET notes = %s WHERE notes = %s",
+        'Controlar la técnica y mantener 1-2 repeticiones en reserva',
+        'Controlar la t??cnica y mantener 1-2 repeticiones en reserva'
+    ) );
+
+    $wpdb->query( $wpdb->prepare(
+        "UPDATE $table_routines SET description = %s WHERE description = %s",
+        'Mantener buena técnica',
+        'Mantener buena tecnica'
+    ) );
 
 
     /*
@@ -2082,11 +3044,11 @@ function gymtrack_routines_page() {
         check_admin_referer( 'gymtrack_add_routine' );
 
         $name = sanitize_text_field(
-            $_POST['routine_name']
+            isset( $_POST['routine_name'] ) ? wp_unslash( $_POST['routine_name'] ) : ''
         );
 
         $description = sanitize_textarea_field(
-            $_POST['routine_description']
+            isset( $_POST['routine_description'] ) ? wp_unslash( $_POST['routine_description'] ) : ''
         );
 
         if ( ! empty( $name ) ) {
@@ -2102,6 +3064,57 @@ function gymtrack_routines_page() {
                     '%s',
                 )
             );
+
+            wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+            exit;
+        }
+    }
+
+
+    /*
+     * Editar rutina
+     */
+
+    if ( isset( $_POST['gymtrack_edit_routine'] ) ) {
+
+        $routine_id = absint( isset( $_POST['routine_id'] ) ? $_POST['routine_id'] : 0 );
+
+        check_admin_referer(
+            'gymtrack_edit_routine_' . $routine_id
+        );
+
+        $name = sanitize_text_field(
+            isset( $_POST['routine_name'] ) ? wp_unslash( $_POST['routine_name'] ) : ''
+        );
+
+        $description = sanitize_textarea_field(
+            isset( $_POST['routine_description'] ) ? wp_unslash( $_POST['routine_description'] ) : ''
+        );
+
+        if ( $routine_id > 0 && ! empty( $name ) ) {
+
+            $updated = $wpdb->update(
+                $table_routines,
+                array(
+                    'name'        => $name,
+                    'description' => $description,
+                ),
+                array(
+                    'id' => $routine_id,
+                ),
+                array(
+                    '%s',
+                    '%s',
+                ),
+                array(
+                    '%d',
+                )
+            );
+
+            if ( false !== $updated ) {
+                wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+                exit;
+            }
         }
     }
 
@@ -2112,14 +3125,14 @@ function gymtrack_routines_page() {
 
     if ( isset( $_POST['gymtrack_add_routine_exercise'] ) ) {
 
-        $routine_id = absint( $_POST['routine_id'] );
-        $exercise_id = absint( $_POST['exercise_id'] );
-        $exercise_order = absint( $_POST['exercise_order'] );
-        $target_sets = absint( $_POST['target_sets'] );
-        $target_repetitions = absint( $_POST['target_repetitions'] );
-        $rest_seconds = absint( $_POST['rest_seconds'] );
+        $routine_id = absint( isset( $_POST['routine_id'] ) ? $_POST['routine_id'] : 0 );
+        $exercise_id = absint( isset( $_POST['exercise_id'] ) ? $_POST['exercise_id'] : 0 );
+        $exercise_order = absint( isset( $_POST['exercise_order'] ) ? $_POST['exercise_order'] : 1 );
+        $target_sets = absint( isset( $_POST['target_sets'] ) ? $_POST['target_sets'] : 1 );
+        $target_repetitions = absint( isset( $_POST['target_repetitions'] ) ? $_POST['target_repetitions'] : 1 );
+        $rest_seconds = absint( isset( $_POST['rest_seconds'] ) ? $_POST['rest_seconds'] : 0 );
         $notes = sanitize_textarea_field(
-            $_POST['routine_exercise_notes']
+            isset( $_POST['routine_exercise_notes'] ) ? wp_unslash( $_POST['routine_exercise_notes'] ) : ''
         );
 
         check_admin_referer(
@@ -2128,66 +3141,125 @@ function gymtrack_routines_page() {
 
         if ( $routine_id > 0 && $exercise_id > 0 ) {
 
-            if ( $exercise_order < 1 ) {
-                $exercise_order = 1;
-            }
+            $exercise_order = max( 1, $exercise_order );
+            $target_sets = max( 1, $target_sets );
+            $target_repetitions = max( 1, $target_repetitions );
+            $rest_seconds = max( 0, $rest_seconds );
 
-            if ( $target_sets < 1 ) {
-                $target_sets = 1;
-            }
-
-            if ( $target_repetitions < 1 ) {
-                $target_repetitions = 1;
-            }
-
-            if ( $rest_seconds < 0 ) {
-                $rest_seconds = 0;
-            }
-
-            $table_routine_exercises =
-                $wpdb->prefix . 'gymtrack_routine_exercises';
-
-
-            /*
-             * Evitar duplicados
-             */
-
-            $existing_exercise = $wpdb->get_var(
+            $routine_exists = $wpdb->get_var(
                 $wpdb->prepare(
-                    "SELECT id
-                    FROM $table_routine_exercises
-                    WHERE routine_id = %d
-                    AND exercise_id = %d
-                    LIMIT 1",
-                    $routine_id,
+                    "SELECT id FROM $table_routines WHERE id = %d LIMIT 1",
+                    $routine_id
+                )
+            );
+
+            $exercise_exists = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT id FROM $table_exercises WHERE id = %d LIMIT 1",
                     $exercise_id
                 )
             );
 
+            if ( $routine_exists && $exercise_exists ) {
 
-            if ( ! $existing_exercise ) {
-
-                $wpdb->insert(
-                    $table_routine_exercises,
-                    array(
-                        'routine_id'         => $routine_id,
-                        'exercise_id'        => $exercise_id,
-                        'exercise_order'     => $exercise_order,
-                        'target_sets'        => $target_sets,
-                        'target_repetitions' => $target_repetitions,
-                        'rest_seconds'       => $rest_seconds,
-                        'notes'              => $notes,
-                    ),
-                    array(
-                        '%d',
-                        '%d',
-                        '%d',
-                        '%d',
-                        '%d',
-                        '%d',
-                        '%s',
+                $existing_exercise = $wpdb->get_var(
+                    $wpdb->prepare(
+                        "SELECT id
+                        FROM $table_routine_exercises
+                        WHERE routine_id = %d
+                        AND exercise_id = %d
+                        LIMIT 1",
+                        $routine_id,
+                        $exercise_id
                     )
                 );
+
+                if ( ! $existing_exercise ) {
+
+                    $wpdb->insert(
+                        $table_routine_exercises,
+                        array(
+                            'routine_id'         => $routine_id,
+                            'exercise_id'        => $exercise_id,
+                            'exercise_order'     => $exercise_order,
+                            'target_sets'        => $target_sets,
+                            'target_repetitions' => $target_repetitions,
+                            'rest_seconds'       => $rest_seconds,
+                            'notes'              => $notes,
+                        ),
+                        array(
+                            '%d',
+                            '%d',
+                            '%d',
+                            '%d',
+                            '%d',
+                            '%d',
+                            '%s',
+                        )
+                    );
+
+                    wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+                    exit;
+                }
+            }
+        }
+    }
+
+
+    /*
+     * Editar ejercicio de rutina
+     */
+
+    if ( isset( $_POST['gymtrack_edit_routine_exercise'] ) ) {
+
+        $routine_exercise_id = absint( isset( $_POST['routine_exercise_id'] ) ? $_POST['routine_exercise_id'] : 0 );
+        $routine_id = absint( isset( $_POST['routine_id'] ) ? $_POST['routine_id'] : 0 );
+
+        check_admin_referer(
+            'gymtrack_edit_routine_exercise_' . $routine_exercise_id
+        );
+
+        $exercise_order = max( 1, absint( isset( $_POST['exercise_order'] ) ? $_POST['exercise_order'] : 1 ) );
+        $target_sets = max( 1, absint( isset( $_POST['target_sets'] ) ? $_POST['target_sets'] : 1 ) );
+        $target_repetitions = max( 1, absint( isset( $_POST['target_repetitions'] ) ? $_POST['target_repetitions'] : 1 ) );
+        $rest_seconds = max( 0, absint( isset( $_POST['rest_seconds'] ) ? $_POST['rest_seconds'] : 0 ) );
+        $notes = sanitize_textarea_field(
+            isset( $_POST['routine_exercise_notes'] ) ? wp_unslash( $_POST['routine_exercise_notes'] ) : ''
+        );
+
+        if ( $routine_exercise_id > 0 ) {
+
+            $where = array( 'id' => $routine_exercise_id );
+            $where_format = array( '%d' );
+
+            if ( $routine_id > 0 ) {
+                $where['routine_id'] = $routine_id;
+                $where_format[] = '%d';
+            }
+
+            $updated = $wpdb->update(
+                $table_routine_exercises,
+                array(
+                    'exercise_order'     => $exercise_order,
+                    'target_sets'        => $target_sets,
+                    'target_repetitions' => $target_repetitions,
+                    'rest_seconds'       => $rest_seconds,
+                    'notes'              => $notes,
+                ),
+                $where,
+                array(
+                    '%d',
+                    '%d',
+                    '%d',
+                    '%d',
+                    '%s',
+                ),
+                $where_format
+            );
+
+            if ( false !== $updated ) {
+                wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+                exit;
             }
         }
     }
@@ -2208,8 +3280,7 @@ function gymtrack_routines_page() {
                 'gymtrack_delete_routine_exercise_' . $routine_exercise_id
             );
 
-            $table_routine_exercises =
-                $wpdb->prefix . 'gymtrack_routine_exercises';
+            $table_routine_exercises = $wpdb->prefix . 'gymtrack_routine_exercises';
 
             $wpdb->delete(
                 $table_routine_exercises,
@@ -2220,6 +3291,9 @@ function gymtrack_routines_page() {
                     '%d',
                 )
             );
+
+            wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+            exit;
         }
     }
 
@@ -2240,8 +3314,7 @@ function gymtrack_routines_page() {
                 'gymtrack_delete_routine_' . $routine_id
             );
 
-            $table_routine_exercises =
-                $wpdb->prefix . 'gymtrack_routine_exercises';
+            $table_routine_exercises = $wpdb->prefix . 'gymtrack_routine_exercises';
 
 
             $wpdb->delete(
@@ -2264,6 +3337,9 @@ function gymtrack_routines_page() {
                     '%d',
                 )
             );
+
+            wp_safe_redirect( admin_url( 'admin.php?page=gymtrack-routines' ) );
+            exit;
         }
     }
 
@@ -2371,11 +3447,7 @@ function gymtrack_routines_page() {
 
                 <?php
 
-                $table_routine_exercises =
-                    $wpdb->prefix . 'gymtrack_routine_exercises';
-
-                $table_exercises =
-                    $wpdb->prefix . 'gymtrack_exercises';
+                // Tablas ya definidas al inicio de la página.
 
 
                 /*
@@ -2431,12 +3503,84 @@ function gymtrack_routines_page() {
                     <div class="inside">
 
                         <h3>
-                            <?php echo esc_html( $routine->name ); ?>
+                            <?php echo esc_html( gymtrack_routine_display_text( $routine->name ) ); ?>
                         </h3>
 
                         <p>
-                            <?php echo esc_html( $routine->description ); ?>
+                            <?php echo esc_html( gymtrack_routine_display_text( $routine->description ) ); ?>
                         </p>
+
+                        <div class="gymtrack-edit-section" style="margin:15px 0;">
+                            <button
+                                type="button"
+                                class="button gymtrack-toggle-edit"
+                                aria-expanded="false"
+                                aria-controls="gymtrack-edit-routine-<?php echo esc_attr( $routine->id ); ?>"
+                            >
+                                Editar rutina
+                            </button>
+
+                            <div
+                                id="gymtrack-edit-routine-<?php echo esc_attr( $routine->id ); ?>"
+                                class="gymtrack-edit-panel"
+                                hidden
+                                style="margin-top:15px;"
+                            >
+
+                            <form method="post" style="margin-top:15px;">
+
+                                <?php
+                                wp_nonce_field(
+                                    'gymtrack_edit_routine_' . $routine->id
+                                );
+                                ?>
+
+                                <input
+                                    type="hidden"
+                                    name="routine_id"
+                                    value="<?php echo esc_attr( $routine->id ); ?>"
+                                >
+
+                                <p>
+                                    <label for="routine_name_<?php echo esc_attr( $routine->id ); ?>">
+                                        <strong>Nombre</strong>
+                                    </label>
+                                    <br>
+                                    <input
+                                        type="text"
+                                        name="routine_name"
+                                        id="routine_name_<?php echo esc_attr( $routine->id ); ?>"
+                                        class="regular-text"
+                                        value="<?php echo esc_attr( gymtrack_routine_display_text( $routine->name ) ); ?>"
+                                        required
+                                    >
+                                </p>
+
+                                <p>
+                                    <label for="routine_description_<?php echo esc_attr( $routine->id ); ?>">
+                                        <strong>Descripción</strong>
+                                    </label>
+                                    <br>
+                                    <textarea
+                                        name="routine_description"
+                                        id="routine_description_<?php echo esc_attr( $routine->id ); ?>"
+                                        rows="3"
+                                        class="large-text"
+                                    ><?php echo esc_textarea( gymtrack_routine_display_text( $routine->description ) ); ?></textarea>
+                                </p>
+
+                                <p>
+                                    <input
+                                        type="submit"
+                                        name="gymtrack_edit_routine"
+                                        class="button button-primary"
+                                        value="Guardar cambios"
+                                    >
+                                </p>
+
+                            </form>
+                        </div>
+                        </div>
 
                         <h4>Ejercicios de la rutina</h4>
 
@@ -2457,7 +3601,7 @@ function gymtrack_routines_page() {
                                         <strong>
                                             <?php
                                             echo esc_html(
-                                                $routine_exercise->name
+                                                gymtrack_routine_display_text( $routine_exercise->name )
                                             );
                                             ?>
                                         </strong>
@@ -2465,7 +3609,7 @@ function gymtrack_routines_page() {
                                         —
                                         <?php
                                         echo esc_html(
-                                            $routine_exercise->muscle_group
+                                            gymtrack_routine_display_text( $routine_exercise->muscle_group )
                                         );
                                         ?>
 
@@ -2513,7 +3657,7 @@ function gymtrack_routines_page() {
                                             <strong>Notas:</strong>
                                             <?php
                                             echo esc_html(
-                                                $routine_exercise->notes
+                                                gymtrack_routine_display_text( $routine_exercise->notes )
                                             );
                                             ?>
 
@@ -2530,7 +3674,82 @@ function gymtrack_routines_page() {
 
                                         ?>
 
-                                        <br><br>
+                                        <div class="gymtrack-edit-section" style="margin:10px 0;">
+                                            <button
+                                                type="button"
+                                                class="button gymtrack-toggle-edit"
+                                                aria-expanded="false"
+                                                aria-controls="gymtrack-edit-exercise-<?php echo esc_attr( $routine_exercise->id ); ?>"
+                                            >
+                                                Editar ejercicio
+                                            </button>
+
+                                            <div
+                                                id="gymtrack-edit-exercise-<?php echo esc_attr( $routine_exercise->id ); ?>"
+                                                class="gymtrack-edit-panel"
+                                                hidden
+                                                style="margin-top:15px;"
+                                            >
+
+                                            <form method="post" style="margin-top:15px;">
+
+                                                <?php
+                                                wp_nonce_field(
+                                                    'gymtrack_edit_routine_exercise_' . $routine_exercise->id
+                                                );
+                                                ?>
+
+                                                <input
+                                                    type="hidden"
+                                                    name="routine_id"
+                                                    value="<?php echo esc_attr( $routine->id ); ?>"
+                                                >
+
+                                                <input
+                                                    type="hidden"
+                                                    name="routine_exercise_id"
+                                                    value="<?php echo esc_attr( $routine_exercise->id ); ?>"
+                                                >
+
+                                                <p>
+                                                    <label><strong>Orden</strong></label><br>
+                                                    <input type="number" name="exercise_order" value="<?php echo esc_attr( $routine_exercise->exercise_order ); ?>" min="1" required style="width:80px;">
+                                                </p>
+
+                                                <p>
+                                                    <label><strong>Series objetivo</strong></label><br>
+                                                    <input type="number" name="target_sets" value="<?php echo esc_attr( $routine_exercise->target_sets ); ?>" min="1" required style="width:80px;">
+                                                </p>
+
+                                                <p>
+                                                    <label><strong>Repeticiones objetivo</strong></label><br>
+                                                    <input type="number" name="target_repetitions" value="<?php echo esc_attr( $routine_exercise->target_repetitions ); ?>" min="1" required style="width:80px;">
+                                                </p>
+
+                                                <p>
+                                                    <label><strong>Descanso (segundos)</strong></label><br>
+                                                    <input type="number" name="rest_seconds" value="<?php echo esc_attr( $routine_exercise->rest_seconds ); ?>" min="0" required style="width:100px;">
+                                                </p>
+
+                                                <p>
+                                                    <label><strong>Notas</strong></label><br>
+                                                    <textarea name="routine_exercise_notes" rows="3" class="large-text"><?php echo esc_textarea( $routine_exercise->notes ); ?></textarea>
+                                                </p>
+
+                                                <p>
+                                                    <input
+                                                        type="submit"
+                                                        name="gymtrack_edit_routine_exercise"
+                                                        class="button button-primary"
+                                                        value="Guardar cambios"
+                                                    >
+                                                </p>
+
+                                            </form>
+                                        </div>
+                                        </div>
+
+                                        <br>
 
                                         <a
                                             href="<?php echo esc_url( $delete_exercise_url ); ?>"
@@ -2576,7 +3795,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="exercise_id">
+                                    <label for="exercise_id_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Ejercicio
@@ -2588,7 +3807,7 @@ function gymtrack_routines_page() {
 
                                 <select
                                     name="exercise_id"
-                                    id="exercise_id"
+                                    id="exercise_id_<?php echo esc_attr( $routine->id ); ?>"
                                     required
                                 >
 
@@ -2620,7 +3839,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="exercise_order">
+                                    <label for="exercise_order_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Orden
@@ -2633,7 +3852,7 @@ function gymtrack_routines_page() {
                                     <input
                                         type="number"
                                         name="exercise_order"
-                                        id="exercise_order"
+                                        id="exercise_order_<?php echo esc_attr( $routine->id ); ?>"
                                         value="1"
                                         min="1"
                                         style="width:80px;"
@@ -2643,7 +3862,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="target_sets">
+                                    <label for="target_sets_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Series objetivo
@@ -2656,7 +3875,7 @@ function gymtrack_routines_page() {
                                     <input
                                         type="number"
                                         name="target_sets"
-                                        id="target_sets"
+                                        id="target_sets_<?php echo esc_attr( $routine->id ); ?>"
                                         value="3"
                                         min="1"
                                         required
@@ -2667,7 +3886,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="target_repetitions">
+                                    <label for="target_repetitions_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Repeticiones objetivo
@@ -2680,7 +3899,7 @@ function gymtrack_routines_page() {
                                     <input
                                         type="number"
                                         name="target_repetitions"
-                                        id="target_repetitions"
+                                        id="target_repetitions_<?php echo esc_attr( $routine->id ); ?>"
                                         value="10"
                                         min="1"
                                         required
@@ -2691,7 +3910,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="rest_seconds">
+                                    <label for="rest_seconds_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Descanso (segundos)
@@ -2704,7 +3923,7 @@ function gymtrack_routines_page() {
                                     <input
                                         type="number"
                                         name="rest_seconds"
-                                        id="rest_seconds"
+                                        id="rest_seconds_<?php echo esc_attr( $routine->id ); ?>"
                                         value="90"
                                         min="0"
                                         required
@@ -2715,7 +3934,7 @@ function gymtrack_routines_page() {
 
                                 <p>
 
-                                    <label for="routine_exercise_notes">
+                                    <label for="routine_exercise_notes_<?php echo esc_attr( $routine->id ); ?>">
 
                                         <strong>
                                             Notas
@@ -2727,7 +3946,7 @@ function gymtrack_routines_page() {
 
                                     <textarea
                                         name="routine_exercise_notes"
-                                        id="routine_exercise_notes"
+                                        id="routine_exercise_notes_<?php echo esc_attr( $routine->id ); ?>"
                                         rows="3"
                                         class="large-text"
                                     ></textarea>
@@ -2780,6 +3999,60 @@ function gymtrack_routines_page() {
 
         <?php endif; ?>
 
+        <style>
+            .gymtrack-edit-section {
+                display: block;
+            }
+            .gymtrack-toggle-edit {
+                margin-top: 8px;
+            }
+            .gymtrack-edit-panel {
+                padding: 14px 16px;
+                border-left: 3px solid #2271b1;
+                background: #f6f7f7;
+                max-width: 760px;
+            }
+            .gymtrack-edit-panel p:last-child {
+                margin-bottom: 0;
+            }
+            .gymtrack-routine-exercise-actions {
+                margin-top: 12px;
+            }
+            .gymtrack-add-exercise-form {
+                max-width: 760px;
+            }
+        </style>
+
+        <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            document.querySelectorAll('.gymtrack-toggle-edit').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    var panelId = button.getAttribute('aria-controls');
+                    var panel = document.getElementById(panelId);
+                    if (!panel) {
+                        return;
+                    }
+
+                    var isHidden = panel.hasAttribute('hidden');
+
+                    if (isHidden) {
+                        panel.removeAttribute('hidden');
+                        button.setAttribute('aria-expanded', 'true');
+                        button.textContent = button.textContent.indexOf('rutina') !== -1
+                            ? 'Cerrar edición de rutina'
+                            : 'Cerrar edición de ejercicio';
+                    } else {
+                        panel.setAttribute('hidden', 'hidden');
+                        button.setAttribute('aria-expanded', 'false');
+                        button.textContent = button.textContent.indexOf('rutina') !== -1
+                            ? 'Editar rutina'
+                            : 'Editar ejercicio';
+                    }
+                });
+            });
+        });
+        </script>
+
     </div>
 
     <?php
@@ -2824,6 +4097,11 @@ function gymtrack_workouts_page() {
         $workout_date = sanitize_text_field(
             isset( $_POST['workout_date'] ) ? $_POST['workout_date'] : ''
         );
+
+        $date_object = DateTime::createFromFormat( 'Y-m-d', $workout_date );
+        if ( ! $date_object || $date_object->format( 'Y-m-d' ) !== $workout_date ) {
+            $workout_date = '';
+        }
 
         $notes = sanitize_textarea_field(
             isset( $_POST['notes'] ) ? $_POST['notes'] : ''
@@ -3178,7 +4456,7 @@ function gymtrack_workouts_page() {
                             <option value="0">Registro manual</option>
                             <?php foreach ( $routines as $routine ) : ?>
                                 <option value="<?php echo esc_attr( $routine->id ); ?>">
-                                    <?php echo esc_html( $routine->name ); ?>
+                                    <?php echo esc_html( gymtrack_routine_display_text( $routine->name ) ); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
