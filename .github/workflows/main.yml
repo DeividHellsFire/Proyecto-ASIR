@@ -181,6 +181,8 @@ jobs:
     needs: publish-image
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Windows]
+    env:
+      KUBECONFIG: 'C:\\actions-runner\\.kube\\config'
     steps:
       - name: "Verificar herramientas y acceso al clúster"
         shell: pwsh
@@ -191,6 +193,11 @@ jobs:
           docker compose version
           Write-Host "Comprobando kubectl..."
           kubectl version --client
+          Write-Host "Comprobando archivo de configuración Kubernetes..."
+          if (-not (Test-Path -LiteralPath $env:KUBECONFIG)) {
+            throw "No se encuentra el kubeconfig: $env:KUBECONFIG"
+          }
+          Write-Host "Kubeconfig: $env:KUBECONFIG"
           Write-Host "Comprobando contexto de Kubernetes..."
           kubectl config current-context
           Write-Host "Comprobando namespace GymTrack..."
@@ -201,6 +208,8 @@ jobs:
     needs: [publish-image, test-self-hosted-runner]
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Windows]
+    env:
+      KUBECONFIG: 'C:\\actions-runner\\.kube\\config'
     steps:
       - name: "Actualizar imagen del despliegue"
         shell: pwsh
