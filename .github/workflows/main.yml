@@ -1,304 +1,176 @@
-﻿name: GymTrack CI/CD
+name: GymTrack CI/CD
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/gymtrack-wordpress
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/gymtrack-wordpress
 
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      packages: write
-
     steps:
-      - name: Descargar codigo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configurar PHP
+      - name: Set up PHP 8.3
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: "8.3"
+          extensions: mysqli
+          tools: composer
 
-      - name: Comprobar sintaxis PHP
-        run: php -l gymtrack-plugin/gymtrack.php
-
-      - name: Validar Docker Compose
-        run: docker compose config
-
-      - name: Construir imagen Docker
-        run: docker build -t gymtrack:ci .
-
-      - name: Crear red Docker para CI
-        run: docker network create wordpress_default
-
-      - name: Crear volumenes Docker para CI
-        run: |
-          docker volume create wordpress_wordpress_data
-          docker volume create wordpress_db_data
-
-      - name: Levantar entorno Docker
-        run: docker compose up -d --build
-
-      - name: Esperar a WordPress
-        shell: pwsh
-        run: |
-          $maxAttempts = 30
-          $attempt = 0
-
-          do {
-              $attempt++
-
-              try {
-                  $response = Invoke-WebRequest `
-                      -Uri "http://localhost:8082/" `
-                      -Method GET `
-                      -UseBasicParsing `
-                      -TimeoutSec 5
-
-                  if ([int]$response.StatusCode -eq 200) {
-                      Write-Host "WordPress responde correctamente."
-                      break
-                  }
-              }
-              catch {
-                  Write-Host "Esperando a WordPress... intento $attempt/$maxAttempts"
-              }
-
-              Start-Sleep -Seconds 5
-          }
-          while ($attempt -lt $maxAttempts)
-
-          if ($attempt -ge $maxAttempts) {
-              Write-Host "WordPress no respondio dentro del tiempo esperado." -ForegroundColor Red
-              docker compose ps
-              docker compose logs --tail=100 wordpress
-              docker compose logs --tail=100 db
-              exit 1
-          }
-
-      - name: Inicializar WordPress para CI
-        shell: bash
+      - name: Validate PHP syntax
         run: |
           docker run --rm \
-            --user 33:33 \
-            -e HOME=/tmp \
-            -e WORDPRESS_DB_HOST=db:3306 \
-            -e WORDPRESS_DB_USER=wordpress \
-            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
-            -e WORDPRESS_DB_NAME=wordpress \
-            --volumes-from gymtrack-wordpress \
-            --network container:gymtrack-wordpress \
-            wordpress:cli-php8.3 \
-            wp core install \
+            -v "${PWD}/gymtrack-plugin:/work/gymtrack-plugin" \
+            wordpress:php8.3-apache \
+            php -l /work/gymtrack-plugin/gymtrack.php
+
+      - name: Validate Docker Compose
+        run: docker compose config
+
+      - name: Build Docker image
+        run: docker build -t gymtrack-wordpress:test .
+
+      - name: Create Docker network
+        run: docker network create wordpress_default
+
+      - name: Create Docker volumes
+        run: |
+          docker volume create wordpress_db_data
+          docker volume create wordpress_wordpress_data
+
+      - name: Start Docker environment
+        run: docker compose up -d --build
+
+      - name: Wait for WordPress
+        shell: bash
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8082/wp-login.php >/dev/null 2>&1; then
+              echo "WordPress disponible"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Install WP-CLI
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o wp-cli.phar
+          docker cp wp-cli.phar gymtrack-wordpress:/tmp/wp-cli.phar
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --info
+
+      - name: Install WordPress and activate GymTrack
+        shell: bash
+        run: |
+          docker compose exec -T wordpress php /tmp/wp-cli.phar core install \
+            --path=/var/www/html \
             --url=http://localhost:8082 \
             --title="GymTrack CI" \
             --admin_user=admin \
-            --admin_password="GymTrack_CI_Admin_123!" \
-            --admin_email=ci@gymtrack.local \
+            --admin_password="gymtrack_ci_password" \
+            --admin_email=ci@example.com \
             --skip-email
 
-      - name: Configurar enlaces permanentes
-        shell: bash
-        run: |
-          docker run --rm \
-            --user 33:33 \
-            -e HOME=/tmp \
-            -e WORDPRESS_DB_HOST=db:3306 \
-            -e WORDPRESS_DB_USER=wordpress \
-            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
-            -e WORDPRESS_DB_NAME=wordpress \
-            --volumes-from gymtrack-wordpress \
-            --network container:gymtrack-wordpress \
-            wordpress:cli-php8.3 \
-            wp rewrite structure '/%postname%/'
+          docker compose exec -T wordpress php /tmp/wp-cli.phar plugin activate gymtrack --path=/var/www/html
+          docker compose exec -T wordpress php /tmp/wp-cli.phar rewrite structure '/%postname%/' --path=/var/www/html
+          docker compose exec -T wordpress php /tmp/wp-cli.phar rewrite flush --hard --path=/var/www/html
 
-          docker run --rm \
-            --user 33:33 \
-            -e HOME=/tmp \
-            -e WORDPRESS_DB_HOST=db:3306 \
-            -e WORDPRESS_DB_USER=wordpress \
-            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
-            -e WORDPRESS_DB_NAME=wordpress \
-            --volumes-from gymtrack-wordpress \
-            --network container:gymtrack-wordpress \
-            wordpress:cli-php8.3 \
-            wp rewrite flush --hard
+          # Ejecuta los hooks init del plugin y verifica que la página se haya creado.
+          curl -fsS http://localhost:8082/wp-login.php >/dev/null
+          docker compose exec -T wordpress php /tmp/wp-cli.phar post list \
+            --post_type=page --name=gymtrack --post_status=publish --format=ids \
+            --path=/var/www/html | grep -q .
 
-      - name: Activar plugin GymTrack
-        shell: bash
-        run: |
-          docker run --rm \
-            --user 33:33 \
-            -e HOME=/tmp \
-            -e WORDPRESS_DB_HOST=db:3306 \
-            -e WORDPRESS_DB_USER=wordpress \
-            -e WORDPRESS_DB_PASSWORD=gymtrack_db_pass \
-            -e WORDPRESS_DB_NAME=wordpress \
-            --volumes-from gymtrack-wordpress \
-            --network container:gymtrack-wordpress \
-            wordpress:cli-php8.3 \
-            wp plugin activate gymtrack
-
-      - name: Ejecutar pruebas de humo
+      - name: Run smoke tests
         shell: pwsh
-        run: |
-          pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/smoke-test.ps1"
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/smoke-test.ps1"
 
-      - name: Validar manifiestos Kubernetes
+      - name: Run functional tests
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/functional-test.ps1"
+
+      - name: Run regression tests
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/regression-test.ps1"
+
+      - name: Validate Kubernetes manifests
         shell: bash
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/work" \
-            ghcr.io/yannh/kubeconform:v0.8.0 \
-            -summary \
-            -strict \
-            /work/k8s/
+          curl -L --fail --silent --show-error \
+            -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf kubeconform.tar.gz kubeconform
+          chmod +x kubeconform
+          ./kubeconform -strict -summary -kubernetes-version 1.34.0 \
+            k8s/gymtrack.yaml k8s/gymtrack-ingress.yaml
 
-      - name: Apagar entorno Docker
+      - name: Stop Docker environment
         if: always()
         run: docker compose down
 
   publish-image:
     needs: test-and-build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      packages: write
-
     steps:
-      - name: Descargar codigo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Iniciar sesion en GHCR
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Preparar metadatos de imagen
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=long
-            type=raw,value=latest
-
-      - name: Construir y publicar imagen Docker
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
 
   test-self-hosted-runner:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - gymtrack-deploy
-
-    env:
-      KUBECONFIG: C:\actions-runner\.kube\config
-
+    needs: publish-image
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Windows]
     steps:
-      - name: Comprobar runner
-        shell: powershell -ExecutionPolicy Bypass -File {0}
+      - name: Check runner
+        shell: pwsh
         run: |
-          Write-Host "Runner: $env:RUNNER_NAME"
-          Write-Host "Sistema operativo: $env:RUNNER_OS"
-          Write-Host "Arquitectura: $env:RUNNER_ARCH"
-
-      - name: Comprobar kubectl
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
+          $ErrorActionPreference = "Stop"
+          docker --version
+          docker compose version
           kubectl version --client
-
-      - name: Comprobar contexto Kubernetes
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
           kubectl config current-context
-
-      - name: Comprobar acceso a GymTrack
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl get pods -n gymtrack
-
-      - name: Comprobar Deployment de WordPress
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl get deployment gymtrack-wordpress -n gymtrack
-
-      - name: Comprobar permiso de despliegue
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl auth can-i patch deployment/gymtrack-wordpress -n gymtrack
+          kubectl get namespace gymtrack
 
   deploy-kubernetes:
-    needs:
-      - test-and-build
-      - publish-image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - gymtrack-deploy
-
-    env:
-      KUBECONFIG: C:\actions-runner\.kube\config
-      IMAGE: ghcr.io/deividhellsfire/gymtrack-wordpress:sha-${{ github.sha }}
-
+    needs: [publish-image, test-self-hosted-runner]
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Windows]
     steps:
-      - name: Descargar codigo
-        uses: actions/checkout@v4
-
-      - name: Comprobar contexto Kubernetes
-        shell: powershell -ExecutionPolicy Bypass -File {0}
+      - name: Deploy image to Kubernetes
+        shell: pwsh
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/gymtrack-wordpress:${{ github.sha }}
         run: |
-          kubectl config current-context
-
-      - name: Comprobar imagen objetivo
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          Write-Host "Imagen a desplegar: $env:IMAGE"
-
-      - name: Actualizar Deployment de WordPress
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl set image deployment/gymtrack-wordpress `
-            wordpress=$env:IMAGE `
-            -n gymtrack
-
-      - name: Esperar al rollout
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl rollout status deployment/gymtrack-wordpress `
-            -n gymtrack `
-            --timeout=180s
-
-      - name: Verificar Deployment
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl get deployment gymtrack-wordpress -n gymtrack
-
-      - name: Verificar Pods
-        shell: powershell -ExecutionPolicy Bypass -File {0}
-        run: |
-          kubectl get pods -n gymtrack -l app=gymtrack-wordpress
+          $ErrorActionPreference = "Stop"
+          kubectl -n gymtrack set image deployment/gymtrack-wordpress wordpress=$env:IMAGE
+          kubectl -n gymtrack rollout status deployment/gymtrack-wordpress --timeout=180s

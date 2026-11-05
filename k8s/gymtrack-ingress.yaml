@@ -3,6 +3,10 @@ kind: Ingress
 metadata:
   name: gymtrack
   namespace: gymtrack
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
 spec:
   ingressClassName: nginx
   rules:
