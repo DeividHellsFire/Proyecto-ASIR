@@ -1,4 +1,6 @@
-name: GymTrack CI/CD
+name: GymTrack - Integración y despliegue continuo
+
+run-name: "GymTrack | ${{ github.event_name == 'push' && 'Validación y publicación' || github.event_name == 'pull_request' && 'Validación de cambios' || 'Ejecución manual' }} | ${{ github.ref_name }}"
 
 on:
   push:
@@ -11,69 +13,68 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/gymtrack-wordpress
-
 jobs:
   test-and-build:
+    name: "1. Validar código, Docker y pruebas"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: "Obtener código del repositorio"
         uses: actions/checkout@v4
 
-      - name: Set up PHP 8.3
+      - name: "Preparar PHP 8.3"
         uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
           extensions: mysqli
           tools: composer
 
-      - name: Validate PHP syntax
+      - name: "Comprobar sintaxis PHP del plugin"
         run: |
           docker run --rm \
             -v "${PWD}/gymtrack-plugin:/work/gymtrack-plugin" \
             wordpress:php8.3-apache \
             php -l /work/gymtrack-plugin/gymtrack.php
 
-      - name: Validate Docker Compose
+      - name: "Validar configuración de Docker Compose"
         run: docker compose config
 
-      - name: Build Docker image
+      - name: "Construir imagen Docker para pruebas"
         run: docker build -t gymtrack-wordpress:test .
 
-      - name: Create Docker network
+      - name: "Crear red Docker para el entorno de pruebas"
         run: docker network create wordpress_default
 
-      - name: Create Docker volumes
+      - name: "Crear volúmenes persistentes de pruebas"
         run: |
           docker volume create wordpress_db_data
           docker volume create wordpress_wordpress_data
 
-      - name: Start Docker environment
+      - name: "Iniciar WordPress y MariaDB"
         run: docker compose up -d --build
 
-      - name: Wait for WordPress
+      - name: "Esperar a que WordPress esté disponible"
         shell: bash
         run: |
           for i in {1..60}; do
             if curl -fsS http://localhost:8082/wp-login.php >/dev/null 2>&1; then
-              echo "WordPress disponible"
+              echo "Correcto: WordPress está disponible."
               exit 0
             fi
             sleep 2
           done
+          echo "::error::WordPress no respondió dentro del tiempo límite."
           docker compose ps
           docker compose logs
           exit 1
 
-      - name: Install WP-CLI
+      - name: "Instalar WP-CLI en el contenedor"
         shell: bash
         run: |
           curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o wp-cli.phar
           docker cp wp-cli.phar gymtrack-wordpress:/tmp/wp-cli.phar
           docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root --info
 
-      - name: Install WordPress and activate GymTrack
+      - name: "Instalar WordPress y activar GymTrack"
         shell: bash
         run: |
           docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root core install \
@@ -89,9 +90,7 @@ jobs:
           docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root rewrite structure '/%postname%/' --path=/var/www/html
           docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root rewrite flush --hard --path=/var/www/html
 
-          # Ejecuta WordPress y comprueba que exista la página del dashboard.
-          # Si el plugin no la ha creado automáticamente durante la inicialización,
-          # el pipeline crea la página para que los smoke tests puedan validarla.
+          # Comprueba que exista la página del panel GymTrack.
           curl -fsS http://localhost:8082/wp-login.php >/dev/null
 
           PAGE_ID=$(docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root post list \
@@ -111,24 +110,23 @@ jobs:
             echo "Página GymTrack encontrada (ID: $PAGE_ID)."
           fi
 
-          # Verificación final: el slug debe existir y estar publicado.
           docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root post list \
             --post_type=page --name=gymtrack --post_status=publish --format=ids \
-            --path=/var/www/html | grep -q '[0-9]' 
+            --path=/var/www/html | grep -q '[0-9]'
 
-      - name: Run smoke tests
+      - name: "Ejecutar pruebas básicas (smoke tests)"
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/smoke-test.ps1"
 
-      - name: Run functional tests
+      - name: "Ejecutar pruebas funcionales"
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/functional-test.ps1"
 
-      - name: Run regression tests
+      - name: "Ejecutar pruebas de regresión"
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File "./tests/regression-test.ps1"
 
-      - name: Validate Kubernetes manifests
+      - name: "Validar manifiestos de Kubernetes"
         shell: bash
         run: |
           curl -L --fail --silent --show-error \
@@ -139,59 +137,77 @@ jobs:
           ./kubeconform -strict -summary -kubernetes-version 1.34.0 \
             k8s/gymtrack.yaml k8s/gymtrack-ingress.yaml
 
-      - name: Stop Docker environment
+      - name: "Apagar el entorno Docker de pruebas"
         if: always()
         run: docker compose down
 
   publish-image:
+    name: "2. Publicar imagen Docker en GitHub"
     needs: test-and-build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.image-name.outputs.image }}
     steps:
-      - name: Checkout
+      - name: "Obtener código del repositorio"
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: "Preparar nombre de imagen en minúsculas"
+        id: image-name
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/gymtrack-wordpress"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Imagen que se publicará: $IMAGE"
+
+      - name: "Iniciar sesión en GitHub Container Registry"
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: "Construir y publicar imagen Docker"
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ steps.image-name.outputs.image }}:${{ github.sha }}
+            ${{ steps.image-name.outputs.image }}:latest
 
   test-self-hosted-runner:
+    name: "3. Comprobar equipo de despliegue Kubernetes"
     needs: publish-image
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Windows]
     steps:
-      - name: Check runner
+      - name: "Verificar herramientas y acceso al clúster"
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          Write-Host "Comprobando Docker..."
           docker --version
           docker compose version
+          Write-Host "Comprobando kubectl..."
           kubectl version --client
+          Write-Host "Comprobando contexto de Kubernetes..."
           kubectl config current-context
+          Write-Host "Comprobando namespace GymTrack..."
           kubectl get namespace gymtrack
 
   deploy-kubernetes:
+    name: "4. Desplegar GymTrack en Kubernetes"
     needs: [publish-image, test-self-hosted-runner]
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Windows]
     steps:
-      - name: Deploy image to Kubernetes
+      - name: "Actualizar imagen del despliegue"
         shell: pwsh
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/gymtrack-wordpress:${{ github.sha }}
+          IMAGE: ${{ needs.publish-image.outputs.image_name }}:${{ github.sha }}
         run: |
           $ErrorActionPreference = "Stop"
+          Write-Host "Imagen seleccionada: $env:IMAGE"
           kubectl -n gymtrack set image deployment/gymtrack-wordpress wordpress=$env:IMAGE
           kubectl -n gymtrack rollout status deployment/gymtrack-wordpress --timeout=180s
