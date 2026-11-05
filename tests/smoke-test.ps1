@@ -10,70 +10,46 @@ $Namespace = "gymtrack/v1"
 $script:Passed = 0
 $script:Failed = 0
 
-function Get-Status($err) {
-    try {
-        if ($null -ne $err.Exception.Response) {
-            return [int]$err.Exception.Response.StatusCode
-        }
-    } catch {}
+# HttpClient funciona tanto en Windows PowerShell 5.1 como en PowerShell 7,
+# y no depende de curl.exe (que no está disponible en todos los runners).
+Add-Type -AssemblyName System.Net.Http
 
-    # Compatibilidad adicional con respuestas HTTP de PowerShell 7.
-    try {
-        if ($null -ne $err.Exception.Response.StatusCode) {
-            return [int]$err.Exception.Response.StatusCode
-        }
-    } catch {}
+$script:HttpHandler = [System.Net.Http.HttpClientHandler]::new()
+$script:HttpHandler.AllowAutoRedirect = $false
+$script:HttpClient = [System.Net.Http.HttpClient]::new($script:HttpHandler)
+$script:HttpClient.Timeout = [TimeSpan]::FromSeconds(30)
 
-    return $null
-}
-
-# curl.exe permite leer de forma consistente el código HTTP y la cabecera
-# Location tanto en Windows PowerShell 5.1 como en PowerShell 7.
-function Get-CurlResponse($url) {
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if (-not $curl) {
-        throw "No se encuentra curl.exe. Es necesario para comprobar las redirecciones."
-    }
-
-    $output = & curl.exe -sS -D - -o NUL --max-redirs 0 -w "`n__HTTP_STATUS__:%{http_code}" $url 2>&1
-    $curlExitCode = $LASTEXITCODE
-    $raw = ($output | Out-String)
-
-    if ($curlExitCode -ne 0) {
-        throw "curl.exe terminó con código $curlExitCode. Respuesta: $raw"
-    }
-
-    $status = $null
-    if ($raw -match '(?m)__HTTP_STATUS__:(\d{3})') {
-        $status = [int]$Matches[1]
-    }
+function Get-HttpResponse($url) {
+    $response = $script:HttpClient.GetAsync($url).GetAwaiter().GetResult()
 
     $location = $null
-    if ($raw -match '(?im)^Location:\s*(.+?)\s*$') {
-        $location = $Matches[1].Trim()
+    if ($null -ne $response.Headers.Location) {
+        $location = $response.Headers.Location.ToString()
+        if ($response.Headers.Location.IsAbsoluteUri -eq $false) {
+            $location = [System.Uri]::new([System.Uri]$url, $response.Headers.Location).ToString()
+        }
     }
 
-    return [PSCustomObject]@{
-        StatusCode = $status
+    $result = [PSCustomObject]@{
+        StatusCode = [int]$response.StatusCode
         Location   = $location
-        Raw        = $raw
     }
+
+    $response.Dispose()
+    return $result
 }
 
 function Test-Http($name, $url, [int[]]$expected = @(200)) {
     Write-Host "`nTEST: $name"
     try {
-        $response = Get-CurlResponse $url
-        $status = $response.StatusCode
-
-        if ($null -ne $status -and $expected -contains $status) {
-            Write-Host "  OK - HTTP $status"
+        $response = Get-HttpResponse $url
+        if ($expected -contains $response.StatusCode) {
+            Write-Host "  OK - HTTP $($response.StatusCode)"
             $script:Passed++
-            return
+        } else {
+            Write-Host "  ERROR - HTTP recibido: $($response.StatusCode). Esperado: $($expected -join ', ')"
+            $script:Failed++
         }
-
-        Write-Host "  ERROR - HTTP recibido: $status. Esperado: $($expected -join ', ')"
-        $script:Failed++
     } catch {
         Write-Host "  ERROR - $($_.Exception.Message)"
         $script:Failed++
@@ -83,17 +59,14 @@ function Test-Http($name, $url, [int[]]$expected = @(200)) {
 function Test-PrivateRedirect($name, $url) {
     Write-Host "`nTEST: $name"
     try {
-        $response = Get-CurlResponse $url
-        $status = $response.StatusCode
-        $location = $response.Location
-
-        if ($status -eq 302 -and $location -match '/wp-login\.php') {
+        $response = Get-HttpResponse $url
+        if ($response.StatusCode -eq 302 -and $response.Location -match '/wp-login\.php') {
             Write-Host "  OK - HTTP 302 hacia login"
             $script:Passed++
         } else {
-            Write-Host "  ERROR - HTTP recibido: $status"
-            if ($location) {
-                Write-Host "  Location: $location"
+            Write-Host "  ERROR - HTTP recibido: $($response.StatusCode)"
+            if ($response.Location) {
+                Write-Host "  Location: $($response.Location)"
             }
             $script:Failed++
         }
@@ -108,82 +81,94 @@ Write-Host " GymTrack - Smoke Tests"
 Write-Host " Base URL: $BaseUrl"
 Write-Host "========================================="
 
-Test-Http "WordPress responde" "$BaseUrl/wp-login.php" @(200)
-Test-PrivateRedirect "Dashboard GymTrack redirige al login" "$BaseUrl/gymtrack/"
-Test-PrivateRedirect "Dashboard WordPress redirige al login" "$BaseUrl/wp-admin/"
-
-$assets = @(
-    "gymtrack-home.jpg",
-    "gymtrack-registra.jpg",
-    "gymtrack-analiza.jpg",
-    "gymtrack-superate.jpg",
-    "gymtrack-buscar.jpg"
-)
-
-foreach ($asset in $assets) {
-    Test-Http "Imagen $asset" "$BaseUrl/wp-content/plugins/gymtrack/assets/$asset" @(200)
-}
-
-Write-Host "`nTEST: WordPress REST API responde"
-$rest = $null
 try {
-    $rest = Invoke-RestMethod -Uri "$BaseUrl/wp-json/" -Method Get -ErrorAction Stop
-    Write-Host "  OK - HTTP 200"
-    $script:Passed++
-} catch {
-    $status = Get-Status $_
-    if ($null -ne $status) {
-        Write-Host "  ERROR - HTTP $status"
-    } else {
-        Write-Host "  ERROR - $($_.Exception.Message)"
-    }
-    $script:Failed++
-}
+    Test-Http "WordPress responde" "$BaseUrl/wp-login.php" @(200)
+    Test-PrivateRedirect "Dashboard GymTrack redirige al login" "$BaseUrl/gymtrack/"
+    Test-PrivateRedirect "Dashboard WordPress redirige al login" "$BaseUrl/wp-admin/"
 
-if ($null -ne $rest) {
-    Write-Host "`nTEST: REST API contiene namespace $Namespace"
-    if (@($rest.namespaces) -contains $Namespace) {
-        Write-Host "  OK - Namespace encontrado"
-        $script:Passed++
-    } else {
-        Write-Host "  ERROR - Namespace no encontrado"
-        $script:Failed++
-    }
-}
+    $assets = @(
+        "gymtrack-home.jpg",
+        "gymtrack-registra.jpg",
+        "gymtrack-analiza.jpg",
+        "gymtrack-superate.jpg",
+        "gymtrack-buscar.jpg"
+    )
 
-foreach ($endpoint in @("exercises", "routines", "workouts", "progress")) {
-    Write-Host "`nTEST: Endpoint $endpoint existe y está protegido"
+    foreach ($asset in $assets) {
+        Test-Http "Imagen $asset" "$BaseUrl/wp-content/plugins/gymtrack/assets/$asset" @(200)
+    }
+
+    Write-Host "`nTEST: WordPress REST API responde"
+    $rest = $null
     try {
-        Invoke-RestMethod -Uri "$BaseUrl/wp-json/$Namespace/$endpoint" -Method Get -ErrorAction Stop | Out-Null
-        Write-Host "  ERROR - Acceso anónimo permitido"
-        $script:Failed++
+        $restResponse = Invoke-RestMethod -Uri "$BaseUrl/wp-json/" -Method Get -ErrorAction Stop
+        $rest = $restResponse
+        Write-Host "  OK - HTTP 200"
+        $script:Passed++
     } catch {
-        $status = Get-Status $_
-        if ($status -in @(401, 403)) {
-            Write-Host "  OK - HTTP $status"
+        Write-Host "  ERROR - $($_.Exception.Message)"
+        $script:Failed++
+    }
+
+    if ($null -ne $rest) {
+        Write-Host "`nTEST: REST API contiene namespace $Namespace"
+        if (@($rest.namespaces) -contains $Namespace) {
+            Write-Host "  OK - Namespace encontrado"
             $script:Passed++
         } else {
-            if ($null -eq $status) {
-                Write-Host "  ERROR - No se pudo determinar el HTTP: $($_.Exception.Message)"
-            } else {
-                Write-Host "  ERROR - HTTP recibido: $status"
-            }
+            Write-Host "  ERROR - Namespace no encontrado"
             $script:Failed++
         }
     }
-}
 
-if (Get-Command docker -ErrorAction SilentlyContinue) {
-    foreach ($name in @("gymtrack-wordpress", "gymtrack-db")) {
-        Write-Host "`nTEST: Contenedor Docker $name"
-        $state = docker inspect -f '{{.State.Running}}' $name 2>$null
-        if ($LASTEXITCODE -eq 0 -and $state -eq "true") {
-            Write-Host "  OK - En ejecución"
-            $script:Passed++
-        } else {
-            Write-Host "  ERROR - No encontrado o detenido"
+    foreach ($endpoint in @("exercises", "routines", "workouts", "progress")) {
+        Write-Host "`nTEST: Endpoint $endpoint existe y está protegido"
+        try {
+            Invoke-RestMethod -Uri "$BaseUrl/wp-json/$Namespace/$endpoint" -Method Get -ErrorAction Stop | Out-Null
+            Write-Host "  ERROR - Acceso anónimo permitido"
             $script:Failed++
+        } catch {
+            $status = $null
+            try {
+                if ($null -ne $_.Exception.Response.StatusCode) {
+                    $status = [int]$_.Exception.Response.StatusCode
+                }
+            } catch {}
+
+            if ($status -in @(401, 403)) {
+                Write-Host "  OK - HTTP $status"
+                $script:Passed++
+            } else {
+                if ($null -eq $status) {
+                    Write-Host "  ERROR - No se pudo determinar el HTTP: $($_.Exception.Message)"
+                } else {
+                    Write-Host "  ERROR - HTTP recibido: $status"
+                }
+                $script:Failed++
+            }
         }
+    }
+
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        foreach ($name in @("gymtrack-wordpress", "gymtrack-db")) {
+            Write-Host "`nTEST: Contenedor Docker $name"
+            $state = docker inspect -f '{{.State.Running}}' $name 2>$null
+            if ($LASTEXITCODE -eq 0 -and $state -eq "true") {
+                Write-Host "  OK - En ejecución"
+                $script:Passed++
+            } else {
+                Write-Host "  ERROR - No encontrado o detenido"
+                $script:Failed++
+            }
+        }
+    }
+}
+finally {
+    if ($null -ne $script:HttpClient) {
+        $script:HttpClient.Dispose()
+    }
+    if ($null -ne $script:HttpHandler) {
+        $script:HttpHandler.Dispose()
     }
 }
 
