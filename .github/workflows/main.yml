@@ -71,12 +71,12 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o wp-cli.phar
           docker cp wp-cli.phar gymtrack-wordpress:/tmp/wp-cli.phar
-          docker compose exec -T wordpress php /tmp/wp-cli.phar --info
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root --info
 
       - name: Install WordPress and activate GymTrack
         shell: bash
         run: |
-          docker compose exec -T wordpress php /tmp/wp-cli.phar core install \
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root core install \
             --path=/var/www/html \
             --url=http://localhost:8082 \
             --title="GymTrack CI" \
@@ -85,13 +85,13 @@ jobs:
             --admin_email=ci@example.com \
             --skip-email
 
-          docker compose exec -T wordpress php /tmp/wp-cli.phar plugin activate gymtrack --path=/var/www/html
-          docker compose exec -T wordpress php /tmp/wp-cli.phar rewrite structure '/%postname%/' --path=/var/www/html
-          docker compose exec -T wordpress php /tmp/wp-cli.phar rewrite flush --hard --path=/var/www/html
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root plugin activate gymtrack --path=/var/www/html
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root rewrite structure '/%postname%/' --path=/var/www/html
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root rewrite flush --hard --path=/var/www/html
 
           # Ejecuta los hooks init del plugin y verifica que la página se haya creado.
           curl -fsS http://localhost:8082/wp-login.php >/dev/null
-          docker compose exec -T wordpress php /tmp/wp-cli.phar post list \
+          docker compose exec -T wordpress php /tmp/wp-cli.phar --allow-root post list \
             --post_type=page --name=gymtrack --post_status=publish --format=ids \
             --path=/var/www/html | grep -q .
 
