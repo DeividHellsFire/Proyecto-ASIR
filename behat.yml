@@ -1,0 +1,11 @@
+default:
+  suites:
+    default:
+      paths:
+        - tests/bdd
+      contexts:
+        - GymTrack\Tests\bdd\bootstrap\FeatureContext
+
+  formatters:
+    progress:
+      verbose: true
