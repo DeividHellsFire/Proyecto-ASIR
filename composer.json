@@ -1,0 +1,21 @@
+{
+    "name":  "gymtrack/proyecto-asir",
+    "description":  "Pruebas automatizadas BDD y TDD del plugin GymTrack",
+    "type":  "project",
+    "require-dev":  {
+                        "behat/behat":  "^3.16"
+                    },
+    "autoload-dev":  {
+                         "psr-4":  {
+                                       "GymTrack\\Tests\\":  "tests/"
+                                   }
+                     },
+    "minimum-stability":  "stable",
+    "prefer-stable":  true,
+    "config":  {
+                   "sort-packages":  true,
+                   "platform":  {
+                                    "php":  "8.3.35"
+                                }
+               }
+}
