@@ -64,3 +64,6 @@ __pycache__/
 node_modules/
 npm-debug.log*
 yarn-debug.log*
+
+# Dependencias de Composer
+vendor/
