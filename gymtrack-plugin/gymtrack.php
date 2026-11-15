@@ -1791,12 +1791,204 @@ function gymtrack_frontend_progress_shortcode() {
 add_shortcode('gymtrack_progress','gymtrack_frontend_progress_shortcode');
 
 function gymtrack_frontend_library_shortcode() {
-    $access=gymtrack_frontend_access_check(); if(''!==$access){return $access;}
-    $search=sanitize_text_field(isset($_GET['gymtrack_search'])?wp_unslash($_GET['gymtrack_search']):'');$results=array();$error='';
-    if(''!==$search){$cache_key='gymtrack_wger_'.md5(strtolower($search));$cached=get_transient($cache_key);if(false!==$cached){$results=$cached;}else{$response=wp_remote_get(add_query_arg(array('name__search'=>$search,'limit'=>12),'https://wger.de/api/v2/exerciseinfo/'),array('timeout'=>10,'headers'=>array('Accept'=>'application/json')));if(is_wp_error($response)){$error=$response->get_error_message();}else{$code=wp_remote_retrieve_response_code($response);$body=json_decode(wp_remote_retrieve_body($response),true);if(200!==$code||!is_array($body)){$error='No se ha podido consultar la biblioteca externa.';}else{$results=isset($body['results'])&&is_array($body['results'])?$body['results']:array();set_transient($cache_key,$results,10*MINUTE_IN_SECONDS);}}}}
-    ob_start();echo gymtrack_frontend_styles();?><div class="gymtrack-frontend gymtrack-fullscreen-page"><?php echo gymtrack_frontend_visual_header( 'Buscar ejercicios', 'Explora la biblioteca y encuentra el ejercicio que necesitas.', gymtrack_frontend_asset_url( 'assets/gymtrack-buscar.jpg' ) ); ?><h1>Biblioteca de ejercicios</h1><p class="muted">Consulta ejercicios de la biblioteca pública de wger.</p><div class="gymtrack-card"><form method="get" action="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-biblioteca' ) ); ?>"><div class="field"><label for="gt-search">Buscar ejercicio</label><input id="gt-search" type="search" name="gymtrack_search" value="<?php echo esc_attr($search);?>" placeholder="Ej.: press banca"><button class="button" type="submit">Buscar</button></div></form></div><?php if($error):?><div class="message error"><p><?php echo esc_html($error);?></p></div><?php endif;?><?php if(''!==$search&&!$error&&empty($results)):?><div class="gymtrack-card"><p>No se han encontrado ejercicios</p></div><?php elseif(''!==$search&&!$error):?><div class="card-grid"><?php foreach($results as $item){$name='';$description='';$category='';$translations=isset($item['translations'])&&is_array($item['translations'])?$item['translations']:array();foreach($translations as $tr){if(isset($tr['language'])&&is_array($tr['language'])&&isset($tr['language']['short_name'])&&'es'===$tr['language']['short_name']){$name=$tr['name']??'';$description=wp_strip_all_tags($tr['description']??'');break;}}if(''===$name&&isset($item['name']))$name=$item['name'];if(''===$description&&isset($item['description']))$description=wp_strip_all_tags($item['description']);if(isset($item['category'])&&is_array($item['category']))$category=$item['category']['name']??'';?><div class="exercise-card"><h2><?php echo esc_html($name?:'Ejercicio');?></h2><?php if($category):?><p><strong>Categoría:</strong> <?php echo esc_html($category);?></p><?php endif;?><?php if($description):?><p><?php echo esc_html(wp_trim_words($description,45));?></p><?php endif;?><?php if(isset($item['id'])):?><p class="muted">ID externo: <?php echo esc_html($item['id']);?></p><?php endif;?></div><?php }?></div><?php elseif(''===$search):?><div class="gymtrack-card"><p>Introduce un término para buscar ejercicios.</p></div><?php endif;?><div class="actions"><a class="button secondary" href="<?php echo esc_url(home_url('/gymtrack/'));?>">Volver a GymTrack</a></div></div><?php return ob_get_clean();
+    $access = gymtrack_frontend_access_check();
+
+    if ( '' !== $access ) {
+        return $access;
+    }
+
+    $search = sanitize_text_field(
+        isset( $_GET['gymtrack_search'] )
+            ? wp_unslash( $_GET['gymtrack_search'] )
+            : ''
+    );
+
+    $results = array();
+    $error   = '';
+
+    if ( '' !== $search ) {
+        $cache_key = 'gymtrack_wger_' . md5( strtolower( $search ) );
+        $cached    = get_transient( $cache_key );
+
+        if ( false !== $cached ) {
+            $results = $cached;
+        } else {
+            $response = wp_remote_get(
+                add_query_arg(
+                    array(
+                        'name__search' => $search,
+                        'limit'        => 12,
+                    ),
+                    'https://wger.de/api/v2/exerciseinfo/'
+                ),
+                array(
+                    'timeout' => 10,
+                    'headers' => array(
+                        'Accept' => 'application/json',
+                    ),
+                )
+            );
+
+            if ( is_wp_error( $response ) ) {
+                $error = $response->get_error_message();
+            } else {
+                $code = wp_remote_retrieve_response_code( $response );
+                $body = json_decode(
+                    wp_remote_retrieve_body( $response ),
+                    true
+                );
+
+                if ( 200 !== $code || ! is_array( $body ) ) {
+                    $error = 'No se ha podido consultar la biblioteca externa.';
+                } else {
+                    $results = isset( $body['results'] ) && is_array( $body['results'] )
+                        ? $body['results']
+                        : array();
+
+                    set_transient(
+                        $cache_key,
+                        $results,
+                        10 * MINUTE_IN_SECONDS
+                    );
+                }
+            }
+        }
+    }
+
+    ob_start();
+
+    echo gymtrack_frontend_styles();
+    ?>
+    <div class="gymtrack-frontend gymtrack-fullscreen-page">
+        <?php
+        echo gymtrack_frontend_visual_header(
+            'Buscar ejercicios',
+            'Explora la biblioteca y encuentra el ejercicio que necesitas.',
+            gymtrack_frontend_asset_url( 'assets/gymtrack-buscar.jpg' )
+        );
+        ?>
+
+        <h1>Biblioteca de ejercicios</h1>
+
+        <p class="muted">Consulta ejercicios de la biblioteca pública de wger.</p>
+
+        <div class="gymtrack-card">
+            <form method="get" action="<?php echo esc_url( gymtrack_frontend_page_url( 'gymtrack-biblioteca' ) ); ?>">
+                <div class="field">
+                    <label for="gt-search">Buscar ejercicio</label>
+
+                    <input
+                        id="gt-search"
+                        type="search"
+                        name="gymtrack_search"
+                        value="<?php echo esc_attr( $search ); ?>"
+                        placeholder="Ej.: press banca"
+                    >
+
+                    <button class="button" type="submit">Buscar</button>
+                </div>
+            </form>
+        </div>
+
+        <?php if ( $error ) : ?>
+
+            <div class="message error">
+                <p><?php echo esc_html( $error ); ?></p>
+            </div>
+
+        <?php elseif ( '' !== $search && empty( $results ) ) : ?>
+
+            <div class="gymtrack-card">
+                <p>No se han encontrado ejercicios para esa búsqueda.</p>
+            </div>
+
+        <?php elseif ( '' !== $search ) : ?>
+
+            <div class="card-grid">
+
+                <?php foreach ( $results as $item ) : ?>
+
+                    <?php
+                    $name         = '';
+                    $description  = '';
+                    $category     = '';
+                    $translations = isset( $item['translations'] ) && is_array( $item['translations'] )
+                        ? $item['translations']
+                        : array();
+
+                    foreach ( $translations as $translation ) {
+                        if (
+                            isset( $translation['language'] ) &&
+                            is_array( $translation['language'] ) &&
+                            isset( $translation['language']['short_name'] ) &&
+                            'es' === $translation['language']['short_name']
+                        ) {
+                            $name        = $translation['name'] ?? '';
+                            $description = wp_strip_all_tags(
+                                $translation['description'] ?? ''
+                            );
+                            break;
+                        }
+                    }
+
+                    if ( '' === $name && isset( $item['name'] ) ) {
+                        $name = $item['name'];
+                    }
+
+                    if ( '' === $description && isset( $item['description'] ) ) {
+                        $description = wp_strip_all_tags( $item['description'] );
+                    }
+
+                    if ( isset( $item['category'] ) && is_array( $item['category'] ) ) {
+                        $category = $item['category']['name'] ?? '';
+                    }
+                    ?>
+
+                    <div class="exercise-card">
+                        <h2><?php echo esc_html( $name ?: 'Ejercicio' ); ?></h2>
+
+                        <?php if ( $category ) : ?>
+                            <p>
+                                <strong>Categoría:</strong>
+                                <?php echo esc_html( $category ); ?>
+                            </p>
+                        <?php endif; ?>
+
+                        <?php if ( $description ) : ?>
+                            <p><?php echo esc_html( wp_trim_words( $description, 45 ) ); ?></p>
+                        <?php endif; ?>
+
+                        <?php if ( isset( $item['id'] ) ) : ?>
+                            <p class="muted">
+                                ID externo: <?php echo esc_html( $item['id'] ); ?>
+                            </p>
+                        <?php endif; ?>
+                    </div>
+
+                <?php endforeach; ?>
+
+            </div>
+
+        <?php else : ?>
+
+            <div class="gymtrack-card">
+                <p>Introduce un término para buscar ejercicios.</p>
+            </div>
+
+        <?php endif; ?>
+
+        <div class="actions">
+            <a class="button secondary" href="<?php echo esc_url( home_url( '/gymtrack/' ) ); ?>">
+                Volver a GymTrack
+            </a>
+        </div>
+    </div>
+    <?php
+
+    return ob_get_clean();
 }
-add_shortcode('gymtrack_library','gymtrack_frontend_library_shortcode');
+
+add_shortcode( 'gymtrack_library', 'gymtrack_frontend_library_shortcode' );
 
 function gymtrack_ensure_frontend_pages() {
     $pages=array(
